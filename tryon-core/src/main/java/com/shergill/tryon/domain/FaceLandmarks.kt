@@ -5,6 +5,7 @@ package com.shergill.tryon.domain
  * Left/right are anatomical (subject's left/right).
  */
 object FaceLandmarks {
+    const val NOSE_TIP = 4
     const val NOSE_BRIDGE = 168
     const val FOREHEAD_TOP = 10
     const val CHIN = 152

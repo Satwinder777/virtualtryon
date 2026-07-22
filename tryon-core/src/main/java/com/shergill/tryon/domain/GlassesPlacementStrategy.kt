@@ -3,53 +3,53 @@ package com.shergill.tryon.domain
 import kotlin.math.sqrt
 
 /**
- * Glasses placement — stable 3D head follow for an orthographic selfie overlay.
+ * Glasses placement with nose-bridge anchor and full head follow (yaw / pitch / roll).
  *
- * - Scale from **screen XY** eye span (MediaPipe Z must not inflate size).
- * - Basis uses dampened Z so yaw/pitch work without shearing temples under the chin.
- * - Anchor at mid outer-eyes / nose bridge, slightly down the face.
- *
- * Model after normalize: width≈1 along X, pivot at lenses, temples along −Z.
+ * Critical rules that keep the model glued during rotation:
+ * 1. **Position is always the nose rest point** in overlay space, plus a **local** offset
+ *    rotated by the face quaternion — never a screen-space "down" nudge (that drifts when yawing).
+ * 2. **Rotation** is a right-handed orthonormal basis from eyes + jaw/ears + forehead/chin.
+ *    No Z-damping and no opportunistic Y-flip (those turned yaw into vertical shift).
+ * 3. **Scale** from screen-XY outer-eye distance so MediaPipe Z cannot inflate size.
  */
 class GlassesPlacementStrategy(
-    /** Unit-width frames should slightly wider than outer-eye distance. */
-    private val baseScaleFactor: Float = 1.12f,
+    private val baseScaleFactor: Float = 1.15f,
 ) : PlacementStrategy {
 
     override fun computeTransform(face: FaceFrame): Placement? {
         if (!face.faceDetected) return null
 
-        val left = face.screenLeftEye() ?: return null
-        val right = face.screenRightEye() ?: return null
+        val leftEye = face.screenLeftEye() ?: return null
+        val rightEye = face.screenRightEye() ?: return null
         val forehead = face.landmarkOrNull(FaceLandmarks.FOREHEAD_TOP)?.takeUnless { it == Vec3.ZERO }
             ?: return null
         val chin = face.landmarkOrNull(FaceLandmarks.CHIN)?.takeUnless { it == Vec3.ZERO }
             ?: return null
 
-        val dx = right.x - left.x
-        val dy = right.y - left.y
+        val dx = rightEye.x - leftEye.x
+        val dy = rightEye.y - leftEye.y
         val eyeSpanXy = sqrt(dx * dx + dy * dy).coerceAtLeast(1e-4f)
 
-        val rotation = glassesBasis(left, right, forehead, chin)
-
-        val bridge = face.landmarkOrNull(FaceLandmarks.NOSE_BRIDGE)?.takeUnless { it == Vec3.ZERO }
-        val midX = (left.x + right.x) * 0.5f
-        val midY = (left.y + right.y) * 0.5f
-        val midZ = (left.z + right.z) * 0.5f
-        val anchor = if (bridge != null) {
-            Vec3(bridge.x, bridge.y, midZ)
-        } else {
-            Vec3(midX, midY, midZ)
-        }
-
-        // Local face "down" from forehead→chin projected to dampened up axis.
-        val down = glassesDownAxis(forehead, chin)
-        val position = Vec3(
-            anchor.x + down.x * (0.10f * eyeSpanXy),
-            anchor.y + down.y * (0.10f * eyeSpanXy),
-            // Keep near the face plane; ortho ignores Z for projection but depth-tests use it.
-            midZ * 0.25f,
+        val leftJaw = face.landmarkOrNull(FaceLandmarks.JAW_LEFT)
+        val rightJaw = face.landmarkOrNull(FaceLandmarks.JAW_RIGHT)
+        val rotation = glassesOrientation(
+            leftEye = leftEye,
+            rightEye = rightEye,
+            forehead = forehead,
+            chin = chin,
+            leftJaw = leftJaw,
+            rightJaw = rightJaw,
         )
+
+        val anchor = glassesNoseAnchor(face, leftEye, rightEye)
+        // Local model offset: slightly down the nose and a touch into the face so pads sit on skin.
+        // Applied in face space so it tracks yaw/pitch/roll instead of floating in screen space.
+        val localOffset = Vec3(
+            0f,
+            -0.12f * eyeSpanXy,
+            -0.04f * eyeSpanXy,
+        )
+        val position = anchor + rotation.rotate(localOffset)
 
         return Placement(
             position = position,
@@ -60,43 +60,74 @@ class GlassesPlacementStrategy(
 }
 
 /**
- * Orthonormal glasses basis. Landmark Z is dampened so depth noise cannot tip temples
- * under the jaw; enough Z remains for natural yaw when the head turns.
+ * Rest point between the eyes on the nose — prefer landmark 168, blend toward nose tip.
  */
-internal fun glassesBasis(
-    left: Vec3,
-    right: Vec3,
+internal fun glassesNoseAnchor(face: FaceFrame, leftEye: Vec3, rightEye: Vec3): Vec3 {
+    val midEyes = Vec3(
+        (leftEye.x + rightEye.x) * 0.5f,
+        (leftEye.y + rightEye.y) * 0.5f,
+        (leftEye.z + rightEye.z) * 0.5f,
+    )
+    val bridge = face.landmarkOrNull(FaceLandmarks.NOSE_BRIDGE)?.takeUnless { it == Vec3.ZERO }
+    val tip = face.landmarkOrNull(FaceLandmarks.NOSE_TIP)?.takeUnless { it == Vec3.ZERO }
+
+    val base = bridge ?: midEyes
+    return if (tip != null) {
+        // 75% bridge / mid-eyes, 25% toward tip — sits on the nose, not the forehead.
+        Vec3(
+            base.x * 0.75f + tip.x * 0.25f,
+            base.y * 0.75f + tip.y * 0.25f,
+            base.z * 0.75f + tip.z * 0.25f,
+        )
+    } else {
+        base
+    }
+}
+
+/**
+ * Right-handed basis in overlay space:
+ * - X: along the face toward screen-right (eyes, blended with jaw/ears for yaw stability)
+ * - Y: up the face (chin → forehead), re-orthogonalized
+ * - Z: toward the camera (X × Y), forced to keep +Z facing the viewer
+ *
+ * Intentionally does **not** flip when Y points slightly down — that heuristic converted
+ * yaw into a vertical jump during head turns.
+ */
+internal fun glassesOrientation(
+    leftEye: Vec3,
+    rightEye: Vec3,
     forehead: Vec3,
     chin: Vec3,
-    zDamp: Float = 0.4f,
+    leftJaw: Vec3?,
+    rightJaw: Vec3?,
 ): Quaternion {
-    val eye = Vec3(right.x - left.x, right.y - left.y, (right.z - left.z) * zDamp)
-    var xAxis = eye.normalized()
-    val upRaw = Vec3(
-        forehead.x - chin.x,
-        forehead.y - chin.y,
-        (forehead.z - chin.z) * zDamp,
-    )
-    var zAxis = xAxis.cross(upRaw).normalized()
+    val eyeAxis = rightEye - leftEye
+    val jawAxis = if (
+        leftJaw != null && rightJaw != null &&
+        leftJaw != Vec3.ZERO && rightJaw != Vec3.ZERO
+    ) {
+        // Screen-order the jaw points the same way as eyes.
+        if (leftJaw.x <= rightJaw.x) rightJaw - leftJaw else leftJaw - rightJaw
+    } else {
+        eyeAxis
+    }
+
+    // Blend eyes (precise roll) with jaw/ears (stable yaw when foreshortened).
+    var xAxis = (eyeAxis * 0.65f + jawAxis * 0.35f).normalized()
+    if (xAxis.length() < 1e-5f) xAxis = eyeAxis.normalized()
+
+    val upApprox = (forehead - chin).normalized()
+    var zAxis = xAxis.cross(upApprox).normalized()
     if (zAxis.length() < 1e-5f) {
         zAxis = Vec3(0f, 0f, 1f)
     }
+    // Only enforce camera-facing hemisphere — do not touch Y-up heuristics here.
     if (zAxis.z < 0f) {
         zAxis = zAxis * -1f
         xAxis = xAxis * -1f
     }
-    var yAxis = zAxis.cross(xAxis).normalized()
-    // Prefer +Y roughly screen-up.
-    if (yAxis.y < 0f) {
-        yAxis = yAxis * -1f
-        zAxis = zAxis * -1f
-    }
+    val yAxis = zAxis.cross(xAxis).normalized()
     return rotationFromAxes(xAxis, yAxis, zAxis)
-}
-
-internal fun glassesDownAxis(forehead: Vec3, chin: Vec3): Vec3 {
-    val up = Vec3(forehead.x - chin.x, forehead.y - chin.y, 0f).normalized()
-    return if (up.length() < 1e-5f) Vec3(0f, -1f, 0f) else up * -1f
 }
 
 internal fun rotationFromAxes(xAxis: Vec3, yAxis: Vec3, zAxis: Vec3): Quaternion {
@@ -132,5 +163,12 @@ fun FaceFrame.overlayRollFromEyes(): Quaternion {
     val right = screenRightEye() ?: return Quaternion.IDENTITY
     val forehead = landmarkOrNull(FaceLandmarks.FOREHEAD_TOP) ?: return Quaternion.IDENTITY
     val chin = landmarkOrNull(FaceLandmarks.CHIN) ?: return Quaternion.IDENTITY
-    return glassesBasis(left, right, forehead, chin)
+    return glassesOrientation(
+        leftEye = left,
+        rightEye = right,
+        forehead = forehead,
+        chin = chin,
+        leftJaw = landmarkOrNull(FaceLandmarks.JAW_LEFT),
+        rightJaw = landmarkOrNull(FaceLandmarks.JAW_RIGHT),
+    )
 }

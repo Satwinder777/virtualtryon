@@ -44,11 +44,16 @@ object ModelBoundsNormalizer {
             targetSize / max(sizeX, max(sizeY, sizeZ))
         }
 
+        // Glasses: unit width. Pivot at lens/nosepad height (front + slightly above geometric mid-Y
+        // so the bridge — not the bottom rim — sits on the nose landmark).
         val centerX = (boundingBox.minX + boundingBox.maxX) * 0.5f
-        val centerY = (boundingBox.minY + boundingBox.maxY) * 0.5f
-        // Bias pivot to the front (+Z) so earhooks don't pull the origin behind the lenses.
+        val centerY = if (isGlasses) {
+            boundingBox.minY * 0.35f + boundingBox.maxY * 0.65f
+        } else {
+            (boundingBox.minY + boundingBox.maxY) * 0.5f
+        }
         val centerZ = if (isGlasses) {
-            boundingBox.minZ * 0.15f + boundingBox.maxZ * 0.85f
+            boundingBox.minZ * 0.12f + boundingBox.maxZ * 0.88f
         } else {
             (boundingBox.minZ + boundingBox.maxZ) * 0.5f
         }

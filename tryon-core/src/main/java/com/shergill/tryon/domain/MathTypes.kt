@@ -39,6 +39,20 @@ data class Quaternion(
     val z: Float,
     val w: Float,
 ) {
+    /** Rotate a vector by this unit quaternion. */
+    fun rotate(v: Vec3): Vec3 {
+        // t = 2 * cross(q.xyz, v)
+        val tx = 2f * (y * v.z - z * v.y)
+        val ty = 2f * (z * v.x - x * v.z)
+        val tz = 2f * (x * v.y - y * v.x)
+        // v + w * t + cross(q.xyz, t)
+        return Vec3(
+            v.x + w * tx + (y * tz - z * ty),
+            v.y + w * ty + (z * tx - x * tz),
+            v.z + w * tz + (x * ty - y * tx),
+        )
+    }
+
     companion object {
         val IDENTITY = Quaternion(0f, 0f, 0f, 1f)
 
