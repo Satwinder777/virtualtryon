@@ -1,16 +1,18 @@
 package com.shergill.tryon.domain
 
+import kotlin.math.atan2
 import kotlin.math.sqrt
 
 /**
- * Glasses follow the face in **both X and Y** (and rotate with yaw/pitch/roll).
+ * Glasses stay **horizontal on the face** (frame along the eye line / screen X),
+ * and the whole model tracks the face in X and Y.
  *
- * Position XY is taken directly from the mid-point of the outer eyes every frame so
- * left/right head translation is never dropped. Orientation uses the full 3D
- * forehead→chin vector so pitch (nod) is applied, not only yaw.
+ * Orientation is screen-plane roll only (around Z). That keeps the frames lying
+ * across the eyes instead of standing upright like a vertical stick. Position is
+ * the mid-point of the outer eyes every frame so left/right motion follows on X.
  */
 class GlassesPlacementStrategy(
-    private val baseScaleFactor: Float = 1.15f,
+    private val baseScaleFactor: Float = 1.2f,
 ) : PlacementStrategy {
 
     override fun computeTransform(face: FaceFrame): Placement? {
@@ -18,54 +20,37 @@ class GlassesPlacementStrategy(
 
         val leftEye = face.screenLeftEye() ?: return null
         val rightEye = face.screenRightEye() ?: return null
-        val forehead = face.landmarkOrNull(FaceLandmarks.FOREHEAD_TOP)?.takeUnless { it == Vec3.ZERO }
-            ?: return null
-        val chin = face.landmarkOrNull(FaceLandmarks.CHIN)?.takeUnless { it == Vec3.ZERO }
-            ?: return null
 
-        val midX = (leftEye.x + rightEye.x) * 0.5f
-        val midY = (leftEye.y + rightEye.y) * 0.5f
-        val midZ = (leftEye.z + rightEye.z) * 0.5f
-
+        // Screen axes — do not use landmark Z for orientation (it tips frames vertical).
         val dx = rightEye.x - leftEye.x
         val dy = rightEye.y - leftEye.y
         val eyeSpanXy = sqrt(dx * dx + dy * dy).coerceAtLeast(1e-4f)
 
-        val rotation = glassesOrientation(
-            leftEye = leftEye,
-            rightEye = rightEye,
-            forehead = forehead,
-            chin = chin,
-            leftJaw = face.landmarkOrNull(FaceLandmarks.JAW_LEFT),
-            rightJaw = face.landmarkOrNull(FaceLandmarks.JAW_RIGHT),
-        )
+        val midX = (leftEye.x + rightEye.x) * 0.5f
+        val midY = (leftEye.y + rightEye.y) * 0.5f
 
-        // Primary track: mid-eyes in X and Y every frame (left/right + up/down).
-        // Nose tip only fine-tunes Y slightly so pads sit on the bridge.
+        // Roll in the screen plane so the frame stays horizontal along the eyes.
+        val rollDeg = Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())).toFloat()
+        val rotation = Quaternion.fromAxisAngleDegrees(Vec3(0f, 0f, 1f), rollDeg)
+
+        // Optional nose fine-tune on Y only — X always follows mid-eyes.
         val tip = face.landmarkOrNull(FaceLandmarks.NOSE_TIP)?.takeUnless { it == Vec3.ZERO }
         val bridge = face.landmarkOrNull(FaceLandmarks.NOSE_BRIDGE)?.takeUnless { it == Vec3.ZERO }
         val noseY = when {
-            tip != null && bridge != null -> tip.y * 0.35f + bridge.y * 0.65f
+            tip != null && bridge != null -> bridge.y * 0.7f + tip.y * 0.3f
             bridge != null -> bridge.y
             tip != null -> tip.y
             else -> midY
         }
-        val noseX = when {
-            tip != null && bridge != null -> tip.x * 0.35f + bridge.x * 0.65f
-            bridge != null -> bridge.x
-            tip != null -> tip.x
-            else -> midX
-        }
-        // Blend mid-eyes (stable track) with nose (rest point) on BOTH axes.
-        val anchor = Vec3(
-            midX * 0.55f + noseX * 0.45f,
-            midY * 0.45f + noseY * 0.55f,
-            midZ * 0.35f,
-        )
 
-        // Face-local offset so the frame sits on the nose while still tracking X/Y.
-        val localOffset = Vec3(0f, -0.10f * eyeSpanXy, -0.03f * eyeSpanXy)
-        val position = anchor + rotation.rotate(localOffset)
+        // Down along the rolled frame (local −Y), so pads sit on the nose while
+        // the long axis of the glasses stays along the eye line (local +X).
+        val localDown = rotation.rotate(Vec3(0f, -0.10f * eyeSpanXy, 0f))
+        val position = Vec3(
+            midX + localDown.x,
+            (midY * 0.4f + noseY * 0.6f) + localDown.y,
+            0f,
+        )
 
         return Placement(
             position = position,
@@ -73,42 +58,6 @@ class GlassesPlacementStrategy(
             scaleMultiplier = eyeSpanXy * baseScaleFactor,
         )
     }
-}
-
-/**
- * Full 3D head orientation: eyes (+ jaw) for X, forehead/chin for pitch, Z toward camera.
- */
-internal fun glassesOrientation(
-    leftEye: Vec3,
-    rightEye: Vec3,
-    forehead: Vec3,
-    chin: Vec3,
-    leftJaw: Vec3?,
-    rightJaw: Vec3?,
-): Quaternion {
-    val eyeAxis = rightEye - leftEye
-    val jawAxis = if (
-        leftJaw != null && rightJaw != null &&
-        leftJaw != Vec3.ZERO && rightJaw != Vec3.ZERO
-    ) {
-        if (leftJaw.x <= rightJaw.x) rightJaw - leftJaw else leftJaw - rightJaw
-    } else {
-        eyeAxis
-    }
-
-    var xAxis = (eyeAxis * 0.7f + jawAxis * 0.3f).normalized()
-    if (xAxis.length() < 1e-5f) xAxis = eyeAxis.normalized()
-
-    // Full 3D up — required for pitch (nod). Do not flatten Z.
-    val upApprox = (forehead - chin).normalized()
-    var zAxis = xAxis.cross(upApprox).normalized()
-    if (zAxis.length() < 1e-5f) zAxis = Vec3(0f, 0f, 1f)
-    if (zAxis.z < 0f) {
-        zAxis = zAxis * -1f
-        xAxis = xAxis * -1f
-    }
-    val yAxis = zAxis.cross(xAxis).normalized()
-    return rotationFromAxes(xAxis, yAxis, zAxis)
 }
 
 internal fun rotationFromAxes(xAxis: Vec3, yAxis: Vec3, zAxis: Vec3): Quaternion {
@@ -142,14 +91,8 @@ fun FaceFrame.screenRightEye(): Vec3? {
 fun FaceFrame.overlayRollFromEyes(): Quaternion {
     val left = screenLeftEye() ?: return Quaternion.IDENTITY
     val right = screenRightEye() ?: return Quaternion.IDENTITY
-    val forehead = landmarkOrNull(FaceLandmarks.FOREHEAD_TOP) ?: return Quaternion.IDENTITY
-    val chin = landmarkOrNull(FaceLandmarks.CHIN) ?: return Quaternion.IDENTITY
-    return glassesOrientation(
-        leftEye = left,
-        rightEye = right,
-        forehead = forehead,
-        chin = chin,
-        leftJaw = landmarkOrNull(FaceLandmarks.JAW_LEFT),
-        rightJaw = landmarkOrNull(FaceLandmarks.JAW_RIGHT),
-    )
+    val dx = right.x - left.x
+    val dy = right.y - left.y
+    val rollDeg = Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())).toFloat()
+    return Quaternion.fromAxisAngleDegrees(Vec3(0f, 0f, 1f), rollDeg)
 }
