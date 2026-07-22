@@ -1,20 +1,14 @@
 package com.shergill.tryon.domain
 
-import kotlin.math.atan2
-import kotlin.math.sqrt
-
 /**
- * Glasses placement — screen overlay on the eyes.
+ * Glasses placement with full 3D head pose (yaw / pitch / roll).
  *
- * Uses nose-bridge / mid-eye anchor + **roll only** (atan2 of the eye line).
- * Landmark Z is ignored so depth cannot shear the frames into "broken" temples.
- *
- * Model face-camera correction (XZ → XY) is handled at load by
- * [com.shergill.tryon.render.ModelBoundsNormalizer].
+ * Orthonormal basis from screen-ordered eyes + forehead/chin. Model after normalize:
+ * +X toward screen-right, +Y up, −Z into the head (temples → ears). Glasses assets get
+ * an X-mirror at load so wearer's-left matches the mirrored selfie.
  */
 class GlassesPlacementStrategy(
-    /** Fits unit-normalized frame width (~1) across outer-eye span. */
-    private val baseScaleFactor: Float = 1.35f,
+    private val baseScaleFactor: Float = 1.55f,
 ) : PlacementStrategy {
 
     override fun computeTransform(face: FaceFrame): Placement? {
@@ -22,26 +16,41 @@ class GlassesPlacementStrategy(
 
         val left = face.screenLeftEye() ?: return null
         val right = face.screenRightEye() ?: return null
+        val forehead = face.landmarkOrNull(FaceLandmarks.FOREHEAD_TOP)?.takeUnless { it == Vec3.ZERO }
+            ?: return null
+        val chin = face.landmarkOrNull(FaceLandmarks.CHIN)?.takeUnless { it == Vec3.ZERO }
+            ?: return null
 
-        val dx = right.x - left.x
-        val dy = right.y - left.y
-        val eyeSpan = sqrt(dx * dx + dy * dy).coerceAtLeast(1e-4f)
+        val eyeSpan = (right - left).length().coerceAtLeast(1e-4f)
 
-        // Prefer nose bridge; fall back to mid-pupil line nudged slightly down.
-        val bridge = face.landmarkOrNull(FaceLandmarks.NOSE_BRIDGE)
-            ?.takeUnless { it == Vec3.ZERO }
-        val midX = (left.x + right.x) * 0.5f
-        val midY = (left.y + right.y) * 0.5f
-        val position = if (bridge != null) {
-            Vec3(bridge.x, bridge.y, 0f)
-        } else {
-            val down = eyeSpan * 0.08f
-            Vec3(midX, midY - down, 0f)
+        // +X = along eyes toward screen-right (matches mirrored model +X).
+        var xAxis = (right - left).normalized()
+        var yAxis = (forehead - chin).normalized()
+        var zAxis = xAxis.cross(yAxis).normalized()
+        if (zAxis.length() < 1e-5f) return null
+
+        // Keep +Z toward the camera.
+        if (zAxis.z < 0f) {
+            zAxis = zAxis * -1f
+            xAxis = xAxis * -1f
         }
+        yAxis = zAxis.cross(xAxis).normalized()
 
-        // Pure Z-roll: keeps frames facing the camera; matches head tilt in-plane.
-        val rollRad = atan2(dy, dx)
-        val rotation = Quaternion.fromAxisAngleDegrees(Vec3(0f, 0f, 1f), Math.toDegrees(rollRad.toDouble()).toFloat())
+        val rotation = rotationFromAxes(xAxis, yAxis, zAxis)
+
+        val bridge = face.landmarkOrNull(FaceLandmarks.NOSE_BRIDGE)?.takeUnless { it == Vec3.ZERO }
+        val mid = Vec3(
+            (left.x + right.x) * 0.5f,
+            (left.y + right.y) * 0.5f,
+            (left.z + right.z) * 0.5f,
+        )
+        val anchor = bridge ?: mid
+        // Nudge toward nose tip and slightly into the face.
+        val position = Vec3(
+            anchor.x - yAxis.x * (0.06f * eyeSpan) - zAxis.x * (0.05f * eyeSpan),
+            anchor.y - yAxis.y * (0.06f * eyeSpan) - zAxis.y * (0.05f * eyeSpan),
+            anchor.z - yAxis.z * (0.06f * eyeSpan) - zAxis.z * (0.05f * eyeSpan),
+        )
 
         return Placement(
             position = position,
@@ -49,6 +58,16 @@ class GlassesPlacementStrategy(
             scaleMultiplier = eyeSpan * baseScaleFactor,
         )
     }
+}
+
+internal fun rotationFromAxes(xAxis: Vec3, yAxis: Vec3, zAxis: Vec3): Quaternion {
+    val m = floatArrayOf(
+        xAxis.x, xAxis.y, xAxis.z, 0f,
+        yAxis.x, yAxis.y, yAxis.z, 0f,
+        zAxis.x, zAxis.y, zAxis.z, 0f,
+        0f, 0f, 0f, 1f,
+    )
+    return Quaternion.fromRotationMatrix(m)
 }
 
 fun FaceFrame.screenLeftEye(): Vec3? {
@@ -72,9 +91,16 @@ fun FaceFrame.screenRightEye(): Vec3? {
 fun FaceFrame.overlayRollFromEyes(): Quaternion {
     val left = screenLeftEye() ?: return Quaternion.IDENTITY
     val right = screenRightEye() ?: return Quaternion.IDENTITY
-    val rollRad = atan2(right.y - left.y, right.x - left.x)
-    return Quaternion.fromAxisAngleDegrees(
-        Vec3(0f, 0f, 1f),
-        Math.toDegrees(rollRad.toDouble()).toFloat(),
-    )
+    val forehead = landmarkOrNull(FaceLandmarks.FOREHEAD_TOP) ?: return Quaternion.IDENTITY
+    val chin = landmarkOrNull(FaceLandmarks.CHIN) ?: return Quaternion.IDENTITY
+    var xAxis = (right - left).normalized()
+    var yAxis = (forehead - chin).normalized()
+    var zAxis = xAxis.cross(yAxis).normalized()
+    if (zAxis.length() < 1e-5f) return Quaternion.IDENTITY
+    if (zAxis.z < 0f) {
+        zAxis = zAxis * -1f
+        xAxis = xAxis * -1f
+    }
+    yAxis = zAxis.cross(xAxis).normalized()
+    return rotationFromAxes(xAxis, yAxis, zAxis)
 }

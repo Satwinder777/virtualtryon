@@ -4,15 +4,13 @@ import com.google.android.filament.Box
 import com.google.android.filament.TransformManager
 import com.google.android.filament.gltfio.FilamentAsset
 import com.shergill.tryon.domain.AccessoryType
-import kotlin.math.cos
 import kotlin.math.max
-import kotlin.math.sin
 
 /**
  * Re-centers a loaded glTF asset at the origin and normalizes it to a consistent unit size.
  *
- * For glasses that are authored flat on the XZ plane (Khronos SunglassesKhronos — thin Y after
- * node transforms), bakes −90° X so the frames face the camera (XY, Z toward viewer).
+ * Glasses keep glTF Y-up / front +Z / temples −Z (no RX bake — that tipped Khronos temples up).
+ * A −X mirror is applied so wearer's-left (+X on Khronos) matches the mirrored selfie preview.
  */
 object ModelBoundsNormalizer {
 
@@ -22,7 +20,8 @@ object ModelBoundsNormalizer {
         val centerY: Float,
         val centerZ: Float,
         val transform: FloatArray,
-        val appliedFaceCameraRx: Boolean,
+        val appliedFaceCameraRx: Boolean = false,
+        val mirroredX: Boolean = false,
     )
 
     const val TARGET_UNIT_SIZE: Float = 1f
@@ -42,21 +41,25 @@ object ModelBoundsNormalizer {
         val centerZ = (boundingBox.minZ + boundingBox.maxZ) * 0.5f
 
         // Column-major: S * T(-center)
-        val centerAndScale = floatArrayOf(
+        var transform = floatArrayOf(
             scale, 0f, 0f, 0f,
             0f, scale, 0f, 0f,
             0f, 0f, scale, 0f,
             -centerX * scale, -centerY * scale, -centerZ * scale, 1f,
         )
 
-        // Flat on XZ (height Y much smaller than depth Z) → need −90° X to face camera.
-        val needsFaceCameraRx = accessoryType == AccessoryType.GLASSES &&
-            sizeY < sizeZ * 0.85f
-
-        val transform = if (needsFaceCameraRx) {
-            multiplyMat4(rotationXDegrees(-90f), centerAndScale)
-        } else {
-            centerAndScale
+        val mirrorX = accessoryType == AccessoryType.GLASSES
+        if (mirrorX) {
+            // diag(-1,1,1) so wearer's-left (+X) lands on screen-left after selfie mirror.
+            transform = multiplyMat4(
+                floatArrayOf(
+                    -1f, 0f, 0f, 0f,
+                    0f, 1f, 0f, 0f,
+                    0f, 0f, 1f, 0f,
+                    0f, 0f, 0f, 1f,
+                ),
+                transform,
+            )
         }
 
         return NormalizeResult(
@@ -65,7 +68,8 @@ object ModelBoundsNormalizer {
             centerY = centerY,
             centerZ = centerZ,
             transform = transform,
-            appliedFaceCameraRx = needsFaceCameraRx,
+            appliedFaceCameraRx = false,
+            mirroredX = mirrorX,
         )
     }
 
@@ -89,9 +93,8 @@ object ModelBoundsNormalizer {
     }
 
     /**
-     * Khronos SunglassesKhronos (and similar) ship **8 independent scene roots**.
-     * Filament parents them under [FilamentAsset.getInstance].root — we transform that
-     * entity, and re-parent any orphaned transform nodes so temples/frames never drift apart.
+     * Khronos SunglassesKhronos ships **8 independent scene roots**.
+     * Parent orphans under the Filament instance root so temples/frames move together.
      */
     fun bindUnifiedRoot(
         transformManager: TransformManager,
@@ -111,25 +114,11 @@ object ModelBoundsNormalizer {
             if (entity == pivotEntity || entity == assetRoot) continue
             val entityInstance = transformManager.getInstance(entity)
             if (entityInstance == 0) continue
-            // getParent returns 0 when the entity has no parent.
             if (transformManager.getParent(entityInstance) == 0) {
                 transformManager.setParent(entityInstance, pivotInstance)
             }
         }
         return pivotEntity
-    }
-
-    /** Column-major rotation around X, degrees. */
-    internal fun rotationXDegrees(degrees: Float): FloatArray {
-        val r = Math.toRadians(degrees.toDouble()).toFloat()
-        val c = cos(r)
-        val s = sin(r)
-        return floatArrayOf(
-            1f, 0f, 0f, 0f,
-            0f, c, s, 0f,
-            0f, -s, c, 0f,
-            0f, 0f, 0f, 1f,
-        )
     }
 
     internal fun multiplyMat4(a: FloatArray, b: FloatArray): FloatArray {
