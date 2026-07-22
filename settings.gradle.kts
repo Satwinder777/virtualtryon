@@ -21,3 +21,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "VirtualTryOn"
 include(":app")
+include(":tryon-core")
