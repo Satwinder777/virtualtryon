@@ -23,25 +23,18 @@ import com.google.android.filament.gltfio.AssetLoader
 import com.google.android.filament.gltfio.FilamentAsset
 import com.google.android.filament.gltfio.ResourceLoader
 import com.google.android.filament.gltfio.UbershaderProvider
-import com.google.android.filament.utils.Float3
-import com.google.android.filament.utils.Float4
-import com.google.android.filament.utils.Mat4
 import com.google.android.filament.utils.Utils
-import com.google.android.filament.utils.rotation
-import com.google.android.filament.utils.scale
-import com.google.android.filament.utils.translation
-import com.google.android.filament.utils.transpose
 import com.shergill.tryon.domain.AccessoryType
 import com.shergill.tryon.domain.CalibrationOffsets
 import com.shergill.tryon.domain.Placement
 import com.shergill.tryon.domain.Quaternion
+import com.shergill.tryon.domain.Vec3
 import java.io.File
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.cos
 import kotlin.math.sin
-import com.google.android.filament.utils.Quaternion as FilamentQuaternion
 
 /**
  * Renders a GLB accessory on a transparent [SurfaceView] layered over CameraX PreviewView.
@@ -334,7 +327,7 @@ class FilamentAccessoryRenderer(
             scene?.addEntities(entities)
             modelVisible = true
         }
-        // Match ModelViewer: Filament utils Mat4 is column-vector; transpose → column-major float[].
+        // Column-major world matrix: T * R * (s * Normalize).
         tm.setTransform(instance, composeTransform(normalizeTransform, placement, frame.calibration))
     }
 
@@ -375,8 +368,8 @@ class FilamentAccessoryRenderer(
 
     companion object {
         /**
-         * Builds T * R * S * Normalize, then [transpose]s to column-major for
-         * [TransformManager.setTransform] (same path as Filament ModelViewer).
+         * Column-major [TransformManager.setTransform] matrix:
+         * `T(pos) * R * (s * Normalize)`.
          */
         fun composeTransform(
             normalize: FloatArray,
@@ -384,7 +377,7 @@ class FilamentAccessoryRenderer(
             calibration: CalibrationOffsets,
         ): FloatArray {
             val s = placement.scaleMultiplier * calibration.scale
-            val pos = Float3(
+            val pos = Vec3(
                 placement.position.x + calibration.offsetX,
                 placement.position.y + calibration.offsetY,
                 placement.position.z + calibration.offsetZ,
@@ -397,21 +390,61 @@ class FilamentAccessoryRenderer(
                     calibration.rotationRollDeg,
                 ),
             )
-            val normalizeMat = columnMajorToMat4(normalize)
-            val transform =
-                translation(pos) *
-                    rotation(FilamentQuaternion(rot.x, rot.y, rot.z, rot.w)) *
-                    scale(Float3(s, s, s)) *
-                    normalizeMat
-            return transpose(transform).toFloatArray()
+            val scaled = scaleMat4(normalize, s)
+            val rotated = multiplyMat4(quaternionToMat4(rot), scaled)
+            return translateMat4(rotated, pos)
         }
 
-        private fun columnMajorToMat4(m: FloatArray): Mat4 = Mat4(
-            Float4(m[0], m[1], m[2], m[3]),
-            Float4(m[4], m[5], m[6], m[7]),
-            Float4(m[8], m[9], m[10], m[11]),
-            Float4(m[12], m[13], m[14], m[15]),
+        private fun scaleMat4(m: FloatArray, s: Float): FloatArray = floatArrayOf(
+            m[0] * s, m[1] * s, m[2] * s, m[3],
+            m[4] * s, m[5] * s, m[6] * s, m[7],
+            m[8] * s, m[9] * s, m[10] * s, m[11],
+            m[12] * s, m[13] * s, m[14] * s, m[15],
         )
+
+        private fun translateMat4(m: FloatArray, t: Vec3): FloatArray {
+            val out = m.copyOf()
+            out[12] += t.x
+            out[13] += t.y
+            out[14] += t.z
+            return out
+        }
+
+        private fun multiplyMat4(a: FloatArray, b: FloatArray): FloatArray {
+            val out = FloatArray(16)
+            for (col in 0 until 4) {
+                for (row in 0 until 4) {
+                    out[col * 4 + row] =
+                        a[0 * 4 + row] * b[col * 4 + 0] +
+                            a[1 * 4 + row] * b[col * 4 + 1] +
+                            a[2 * 4 + row] * b[col * 4 + 2] +
+                            a[3 * 4 + row] * b[col * 4 + 3]
+                }
+            }
+            return out
+        }
+
+        private fun quaternionToMat4(q: Quaternion): FloatArray {
+            val x = q.x
+            val y = q.y
+            val z = q.z
+            val w = q.w
+            val xx = x * x
+            val yy = y * y
+            val zz = z * z
+            val xy = x * y
+            val xz = x * z
+            val yz = y * z
+            val wx = w * x
+            val wy = w * y
+            val wz = w * z
+            return floatArrayOf(
+                1f - 2f * (yy + zz), 2f * (xy + wz), 2f * (xz - wy), 0f,
+                2f * (xy - wz), 1f - 2f * (xx + zz), 2f * (yz + wx), 0f,
+                2f * (xz + wy), 2f * (yz - wx), 1f - 2f * (xx + yy), 0f,
+                0f, 0f, 0f, 1f,
+            )
+        }
 
         private fun eulerYawPitchRoll(yawDeg: Float, pitchDeg: Float, rollDeg: Float): Quaternion {
             val yaw = Math.toRadians(yawDeg.toDouble()).toFloat() * 0.5f

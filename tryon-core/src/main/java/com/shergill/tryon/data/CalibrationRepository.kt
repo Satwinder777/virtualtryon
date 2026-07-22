@@ -12,7 +12,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
 private val Context.calibrationDataStore: DataStore<Preferences> by preferencesDataStore(
-    name = "tryon_calibration_v4",
+    name = "tryon_calibration_v5",
 )
 
 class CalibrationRepository(private val context: Context) {

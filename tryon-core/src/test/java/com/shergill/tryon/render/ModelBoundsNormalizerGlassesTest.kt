@@ -9,16 +9,23 @@ import org.junit.Test
 class ModelBoundsNormalizerGlassesTest {
 
     @Test
-    fun glasses_mirrorsX_butDoesNotBakeRx() {
-        val bounds = AxisAlignedBounds(-0.08f, -0.03f, -0.16f, 0.08f, 0.03f, 0.02f)
+    fun glasses_scalesByWidth_andPivotsNearFront() {
+        // Khronos-like: wide X, short Y, deep Z from earhooks.
+        val bounds = AxisAlignedBounds(-0.075f, 0.0f, -0.16f, 0.075f, 0.058f, 0.005f)
         val glasses = ModelBoundsNormalizer.compute(bounds, accessoryType = AccessoryType.GLASSES)
         val plain = ModelBoundsNormalizer.compute(bounds, accessoryType = null)
+
+        assertFalse(glasses.mirroredX)
         assertFalse(glasses.appliedFaceCameraRx)
-        assertTrue(glasses.mirroredX)
-        assertFalse(plain.mirroredX)
-        // Mirror flips X scale sign.
-        assertEquals(-plain.transform[0], glasses.transform[0], 1e-5f)
-        assertEquals(plain.transform[5], glasses.transform[5], 1e-5f)
-        assertEquals(plain.transform[10], glasses.transform[10], 1e-5f)
+        // Width-based scale: 1 / 0.15
+        assertEquals(1f / 0.15f, glasses.scale, 1e-4f)
+        // Front-biased Z pivot (not mid of earhooks).
+        val midZ = (bounds.minZ + bounds.maxZ) * 0.5f
+        assertTrue(
+            "Expected front-biased centerZ=${glasses.centerZ} ahead of midZ=$midZ",
+            glasses.centerZ > midZ,
+        )
+        // Non-glasses still use max-extent scale (dominated by Z here).
+        assertTrue(plain.scale < glasses.scale)
     }
 }

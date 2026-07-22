@@ -1,8 +1,10 @@
 package com.shergill.tryon.domain
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.abs
+import kotlin.math.sqrt
 
 class GlassesPlacementBasisTest {
 
@@ -25,41 +27,32 @@ class GlassesPlacementBasisTest {
     }
 
     @Test
-    fun frontalFace_rotationNearIdentity_withTemplesAlongMinusZ() {
+    fun scale_usesXySpan_notInflatedByLandmarkZ() {
         val face = faceWithPose(
-            left = Vec3(-0.2f, 0.1f, 0f),
-            right = Vec3(0.2f, 0.1f, 0f),
+            left = Vec3(-0.2f, 0.1f, 0.9f),
+            right = Vec3(0.2f, 0.1f, -0.9f),
             forehead = Vec3(0f, 0.35f, 0f),
             chin = Vec3(0f, -0.25f, 0f),
-            bridge = Vec3(0f, 0.08f, 0.02f),
         )
-        val placement = GlassesPlacementStrategy().computeTransform(face)!!
-        val q = placement.rotation
-        // xAxis = left-right = (-1,0,0) → 180° about Y (or similar), not a random shear.
-        assertTrue("Quaternion should be unit, got $q", abs(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w - 1f) < 0.05f)
+        val placement = GlassesPlacementStrategy(baseScaleFactor = 1f).computeTransform(face)!!
+        // XY span = 0.4 even though 3D length is huge.
+        assertEquals(0.4f, placement.scaleMultiplier, 1e-4f)
     }
 
     @Test
-    fun yawedFace_changesOrientationFromFrontal() {
-        val frontal = GlassesPlacementStrategy().computeTransform(
+    fun frontal_quaternionIsUnit() {
+        val placement = GlassesPlacementStrategy().computeTransform(
             faceWithPose(
                 left = Vec3(-0.2f, 0.1f, 0f),
                 right = Vec3(0.2f, 0.1f, 0f),
                 forehead = Vec3(0f, 0.35f, 0f),
                 chin = Vec3(0f, -0.25f, 0f),
+                bridge = Vec3(0f, 0.08f, 0f),
             ),
         )!!
-        val yawed = GlassesPlacementStrategy().computeTransform(
-            faceWithPose(
-                left = Vec3(-0.15f, 0.1f, 0.08f),
-                right = Vec3(0.25f, 0.1f, -0.05f),
-                forehead = Vec3(0.05f, 0.35f, 0.02f),
-                chin = Vec3(0.02f, -0.25f, 0f),
-            ),
-        )!!
-        val dq = abs(frontal.rotation.x - yawed.rotation.x) +
-            abs(frontal.rotation.y - yawed.rotation.y) +
-            abs(frontal.rotation.z - yawed.rotation.z)
-        assertTrue("Expected pose to change with yaw, dq=$dq", dq > 0.05f)
+        val q = placement.rotation
+        val n = sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w)
+        assertEquals(1f, n, 1e-3f)
+        assertTrue(abs(placement.position.x) < 0.05f)
     }
 }

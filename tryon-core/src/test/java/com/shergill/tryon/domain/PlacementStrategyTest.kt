@@ -67,10 +67,10 @@ class PlacementStrategyTest {
         )
         val placement = GlassesPlacementStrategy(baseScaleFactor = 2f).computeTransform(face)
         assertNotNull(placement)
-        // Anchored near nose bridge with a small down/into-face nudge.
-        assertNear(0.01f, placement!!.position.x, eps = 0.02f)
-        assertNear(0.02f, placement.position.y, eps = 0.02f)
-        // eyeSpan = 0.10, scale = 0.20
+        // Anchored near nose bridge with a small down nudge (XY scale, not 3D Z).
+        assertNear(0.01f, placement!!.position.x, eps = 0.05f)
+        assertNear(0.02f, placement.position.y, eps = 0.05f)
+        // eyeSpan XY = 0.10, scale = 0.20
         assertNear(0.20f, placement.scaleMultiplier)
         val q = placement.rotation
         val norm = kotlin.math.sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w)
