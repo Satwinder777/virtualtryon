@@ -153,13 +153,7 @@ class FilamentAccessoryRenderer(
             scene!!.addEntity(fillLightEntity)
 
             camera!!.lookAt(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0)
-            // Orthographic overlay: MediaPipe NDC-style coords map 1:1 to the screen.
-            camera!!.setProjection(
-                Camera.Projection.ORTHO,
-                -1.0, 1.0,
-                -1.0, 1.0,
-                -10.0, 10.0,
-            )
+            // Aspect-correct ortho (updated on resize) — matches FaceCoordMapper world units.
 
             val helper = UiHelper(UiHelper.ContextErrorPolicy.DONT_CHECK).apply {
                 isOpaque = false
@@ -356,13 +350,16 @@ class FilamentAccessoryRenderer(
     }
 
     private fun applyViewport(width: Int, height: Int) {
-        val w = if (reducedQuality) (width * 0.5f).toInt().coerceAtLeast(1) else width
-        val h = if (reducedQuality) (height * 0.5f).toInt().coerceAtLeast(1) else height
+        // Always cover the full SurfaceView so landmarks stay registered with the preview.
+        // LQ flag is retained for UI; shrinking the viewport used to park the overlay in a corner.
+        val w = width.coerceAtLeast(1)
+        val h = height.coerceAtLeast(1)
         view?.viewport = Viewport(0, 0, w, h)
-        // Square NDC matches FaceCoordMapper output (x,y in [-1, 1]).
+        // Pixel-isotropic world: Y ∈ [-1,1], X ∈ [-aspect, aspect] — same as FaceCoordMapper.
+        val aspect = w.toDouble() / h.toDouble()
         camera?.setProjection(
             Camera.Projection.ORTHO,
-            -1.0, 1.0,
+            -aspect, aspect,
             -1.0, 1.0,
             -10.0, 10.0,
         )
