@@ -35,17 +35,17 @@ fun CalibrationControls(
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text(
-                "Calibration",
+                "Fine-tune (optional)",
                 style = MaterialTheme.typography.titleSmall,
                 color = Color.White,
                 modifier = Modifier.weight(1f),
             )
             TextButton(onClick = onReset) {
-                Text("Reset", color = Color.White)
+                Text("Back to auto fit", color = Color.White)
             }
         }
         Text(
-            "Drag sliders until the accessory sits on your face. Values are saved per accessory type.",
+            "Glasses auto-fit by default. Use these only if you want a small manual nudge.",
             style = MaterialTheme.typography.bodySmall,
             color = Color.White.copy(alpha = 0.75f),
         )

@@ -56,7 +56,8 @@ class MediaPipeFaceTracker(
     private data class FrameSize(val width: Int, val height: Int)
 
     private val pendingFrameSize = AtomicReference<FrameSize?>(null)
-    private val landmarkSmoother = LandmarkSmoother(alpha = 0.55f)
+    // High alpha = stick to the live face; low alpha made accessories trail / float.
+    private val landmarkSmoother = LandmarkSmoother(alpha = 0.82f)
 
     override fun start(
         lifecycleOwner: LifecycleOwner,

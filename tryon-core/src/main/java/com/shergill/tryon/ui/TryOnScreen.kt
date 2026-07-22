@@ -209,15 +209,27 @@ fun TryOnScreen(
                             checked = state.reducedQuality,
                             onCheckedChange = viewModel::setReducedQuality,
                         )
-                        TextButton(onClick = { showCalibration = !showCalibration }) {
-                            Text(if (showCalibration) "Hide" else "Calibrate", color = Color.White)
+                        TextButton(onClick = {
+                            val opening = !showCalibration
+                            showCalibration = opening
+                            viewModel.setFineTuneEnabled(opening)
+                        }) {
+                            Text(if (showCalibration) "Auto fit" else "Fine-tune", color = Color.White)
                         }
                     }
                     if (showCalibration) {
+                        Text(
+                            "Optional fine-tune — Auto fit is on by default (like Lenskart).",
+                            color = Color.White.copy(alpha = 0.75f),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                         CalibrationControls(
                             offsets = state.calibration,
                             onChange = viewModel::updateCalibration,
-                            onReset = viewModel::resetCalibration,
+                            onReset = {
+                                viewModel.resetCalibration()
+                                showCalibration = false
+                            },
                         )
                     }
                     state.errorMessage?.let {

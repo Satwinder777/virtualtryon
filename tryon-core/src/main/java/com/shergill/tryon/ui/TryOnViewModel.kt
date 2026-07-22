@@ -8,6 +8,7 @@ import com.shergill.tryon.domain.AccessoryType
 import com.shergill.tryon.domain.CalibrationOffsets
 import com.shergill.tryon.domain.PlacementStrategies
 import com.shergill.tryon.domain.PlacementStrategy
+import com.shergill.tryon.domain.PlacementSmoother
 import com.shergill.tryon.render.FilamentAccessoryRenderer
 import com.shergill.tryon.tracking.FaceTracker
 import com.shergill.tryon.tracking.MediaPipeFaceTracker
@@ -38,6 +39,7 @@ class TryOnViewModel(
 
     private val calibrationRepository = CalibrationRepository(application)
     private val strategy: PlacementStrategy = PlacementStrategies.forType(accessoryType)
+    private val placementSmoother = PlacementSmoother()
 
     private var faceTracker: FaceTracker? = null
     private var renderer: FilamentAccessoryRenderer? = null
@@ -47,16 +49,20 @@ class TryOnViewModel(
 
     private var lastFaceTimestampMs: Long = System.currentTimeMillis()
 
+    /** When false (default), Lenskart-style auto-fit ignores saved sliders. */
+    private var fineTuneEnabled: Boolean = false
+
     init {
+        // Auto-fit by default — clear any leftover slider values from older sessions.
         viewModelScope.launch {
-            calibrationRepository.observe(accessoryType).collect { offsets ->
-                _uiState.update { it.copy(calibration = offsets) }
-            }
+            calibrationRepository.save(accessoryType, CalibrationOffsets.IDENTITY)
+            _uiState.update { it.copy(calibration = CalibrationOffsets.IDENTITY) }
         }
     }
 
     fun attachRenderer(renderer: FilamentAccessoryRenderer) {
         this.renderer = renderer
+        placementSmoother.reset()
         try {
             renderer.loadModel(modelFile, accessoryType)
             _uiState.update { it.copy(modelLoaded = true, errorMessage = null) }
@@ -74,7 +80,7 @@ class TryOnViewModel(
     }
 
     fun onTrackerStarted() {
-        // no-op hook
+        placementSmoother.reset()
     }
 
     fun onNoFrontCamera() {
@@ -92,12 +98,17 @@ class TryOnViewModel(
                     showAlignHint = showHint,
                 )
             }
-            renderer?.updateTransform(null, _uiState.value.calibration)
+            placementSmoother.reset()
+            renderer?.updateTransform(null, activeCalibration())
             return
         }
         lastFaceTimestampMs = now
-        // Tracker already emits overlay-space landmarks (PreviewView FILL_CENTER mapped).
-        val placement = strategy.computeTransform(face)
+        val raw = strategy.computeTransform(face)
+        val placement = if (accessoryType == AccessoryType.GLASSES) {
+            placementSmoother.smooth(raw)
+        } else {
+            raw
+        }
         _uiState.update {
             it.copy(
                 faceDetected = true,
@@ -106,10 +117,18 @@ class TryOnViewModel(
                 noFrontCamera = false,
             )
         }
-        renderer?.updateTransform(placement, _uiState.value.calibration)
+        renderer?.updateTransform(placement, activeCalibration())
+    }
+
+    fun setFineTuneEnabled(enabled: Boolean) {
+        fineTuneEnabled = enabled
+        if (!enabled) {
+            resetCalibration()
+        }
     }
 
     fun updateCalibration(offsets: CalibrationOffsets) {
+        fineTuneEnabled = true
         _uiState.update { it.copy(calibration = offsets) }
         viewModelScope.launch {
             calibrationRepository.save(accessoryType, offsets)
@@ -117,8 +136,15 @@ class TryOnViewModel(
     }
 
     fun resetCalibration() {
-        updateCalibration(CalibrationOffsets.IDENTITY)
+        fineTuneEnabled = false
+        _uiState.update { it.copy(calibration = CalibrationOffsets.IDENTITY) }
+        viewModelScope.launch {
+            calibrationRepository.save(accessoryType, CalibrationOffsets.IDENTITY)
+        }
     }
+
+    private fun activeCalibration(): CalibrationOffsets =
+        if (fineTuneEnabled) _uiState.value.calibration else CalibrationOffsets.IDENTITY
 
     fun setReducedQuality(enabled: Boolean) {
         _uiState.update { it.copy(reducedQuality = enabled) }
