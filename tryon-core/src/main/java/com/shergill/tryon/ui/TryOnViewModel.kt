@@ -8,7 +8,6 @@ import com.shergill.tryon.domain.AccessoryType
 import com.shergill.tryon.domain.CalibrationOffsets
 import com.shergill.tryon.domain.PlacementStrategies
 import com.shergill.tryon.domain.PlacementStrategy
-import com.shergill.tryon.domain.PlacementSmoother
 import com.shergill.tryon.render.FilamentAccessoryRenderer
 import com.shergill.tryon.tracking.FaceTracker
 import com.shergill.tryon.tracking.MediaPipeFaceTracker
@@ -39,7 +38,6 @@ class TryOnViewModel(
 
     private val calibrationRepository = CalibrationRepository(application)
     private val strategy: PlacementStrategy = PlacementStrategies.forType(accessoryType)
-    private val placementSmoother = PlacementSmoother()
 
     private var faceTracker: FaceTracker? = null
     private var renderer: FilamentAccessoryRenderer? = null
@@ -48,9 +46,16 @@ class TryOnViewModel(
     val uiState: StateFlow<TryOnUiState> = _uiState.asStateFlow()
 
     private var lastFaceTimestampMs: Long = System.currentTimeMillis()
+    /** Last successful live placement — reused only when landmarks drop for a moment. */
+    private var lastValidPlacement: com.shergill.tryon.domain.Placement? = null
 
-    /** When false (default), Lenskart-style auto-fit ignores saved sliders. */
+    /** When false (default), auto-fit ignores saved sliders. */
     private var fineTuneEnabled: Boolean = false
+
+    companion object {
+        /** Keep last glasses pose briefly so a dropped frame does not jump/hide. */
+        private const val FACE_LOST_FREEZE_MS = 1_200L
+    }
 
     init {
         // Auto-fit by default — clear any leftover slider values from older sessions.
@@ -62,7 +67,7 @@ class TryOnViewModel(
 
     fun attachRenderer(renderer: FilamentAccessoryRenderer) {
         this.renderer = renderer
-        placementSmoother.reset()
+        lastValidPlacement = null
         try {
             renderer.loadModel(modelFile, accessoryType)
             _uiState.update { it.copy(modelLoaded = true, errorMessage = null) }
@@ -80,7 +85,7 @@ class TryOnViewModel(
     }
 
     fun onTrackerStarted() {
-        placementSmoother.reset()
+        lastValidPlacement = null
     }
 
     fun onNoFrontCamera() {
@@ -90,7 +95,8 @@ class TryOnViewModel(
     fun onFrame(face: com.shergill.tryon.domain.FaceFrame?) {
         val now = System.currentTimeMillis()
         if (face == null || !face.faceDetected) {
-            val showHint = now - lastFaceTimestampMs > 2_000L
+            val lostFor = now - lastFaceTimestampMs
+            val showHint = lostFor > 2_000L
             _uiState.update {
                 it.copy(
                     faceDetected = false,
@@ -98,17 +104,20 @@ class TryOnViewModel(
                     showAlignHint = showHint,
                 )
             }
-            placementSmoother.reset()
-            renderer?.updateTransform(null, activeCalibration())
+            val frozen = lastValidPlacement
+            if (frozen != null && lostFor <= FACE_LOST_FREEZE_MS) {
+                // Re-publish last live pose (freeze) — never jump to a screen corner.
+                renderer?.updateTransform(frozen, activeCalibration())
+            } else if (lostFor > FACE_LOST_FREEZE_MS) {
+                lastValidPlacement = null
+                renderer?.updateTransform(null, activeCalibration())
+            }
             return
         }
         lastFaceTimestampMs = now
-        val raw = strategy.computeTransform(face)
-        val placement = if (accessoryType == AccessoryType.GLASSES) {
-            placementSmoother.smooth(raw)
-        } else {
-            raw
-        }
+        // Face is detected: always recompute from this frame's landmarks.
+        // Never reuse lastValidPlacement while the face is present.
+        val placement = strategy.computeTransform(face)
         _uiState.update {
             it.copy(
                 faceDetected = true,
@@ -117,6 +126,12 @@ class TryOnViewModel(
                 noFrontCamera = false,
             )
         }
+        if (placement == null) {
+            // Incomplete landmarks this frame — hide rather than pin a stale screen pose.
+            renderer?.updateTransform(null, activeCalibration())
+            return
+        }
+        lastValidPlacement = placement
         renderer?.updateTransform(placement, activeCalibration())
     }
 

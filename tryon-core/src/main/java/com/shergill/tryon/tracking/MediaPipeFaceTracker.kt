@@ -1,6 +1,8 @@
 package com.shergill.tryon.tracking
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.os.SystemClock
 import android.util.Size
 import androidx.camera.core.CameraSelector
@@ -17,19 +19,18 @@ import androidx.lifecycle.LifecycleOwner
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
-import com.google.mediapipe.tasks.vision.core.ImageProcessingOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
 import com.shergill.tryon.domain.FaceCoordMapper
 import com.shergill.tryon.domain.FaceFrame
+import com.shergill.tryon.domain.LandmarkOrientation
 import com.shergill.tryon.domain.Mat4
 import com.shergill.tryon.domain.Vec3
 import com.shergill.tryon.domain.toOverlaySpace
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-
 /**
  * MediaPipe Face Landmarker tracker.
  *
@@ -39,7 +40,10 @@ import java.util.concurrent.atomic.AtomicReference
  * Camera notes for try-on:
  * - Uses the **front** camera (required for selfie try-on; back camera would break UX).
  * - Analysis targets 1280×720+ via ResolutionSelector for sharper landmarks.
- * - Rotation is applied via [ImageProcessingOptions] (no expensive bitmap re-encode).
+ * - Bitmap is rotated to upright **before** MediaPipe (same as the official sample).
+ *   Relying only on ImageProcessingOptions left landmarks in sideways buffer space →
+ *   eye line along Y → glasses roll ≈90° (vertical frames on a frontal face).
+ * - Front-camera mirror is applied later in [FaceCoordMapper] (do not flip the bitmap here).
  */
 class MediaPipeFaceTracker(
     private val context: Context,
@@ -56,8 +60,8 @@ class MediaPipeFaceTracker(
     private data class FrameSize(val width: Int, val height: Int)
 
     private val pendingFrameSize = AtomicReference<FrameSize?>(null)
-    // High alpha = stick to the live face; low alpha made accessories trail / float.
-    private val landmarkSmoother = LandmarkSmoother(alpha = 0.82f)
+    // Passthrough — any landmark EMA made overlays lag / look pinned off-face.
+    private val landmarkSmoother = LandmarkSmoother(alpha = 1f)
 
     override fun start(
         lifecycleOwner: LifecycleOwner,
@@ -179,18 +183,28 @@ class MediaPipeFaceTracker(
             return
         }
         try {
-            val degrees = imageProxy.imageInfo.rotationDegrees
-            // Landmark space is post-rotation (upright).
-            val uprightW = if (degrees == 90 || degrees == 270) imageProxy.height else imageProxy.width
-            val uprightH = if (degrees == 90 || degrees == 270) imageProxy.width else imageProxy.height
-            pendingFrameSize.set(FrameSize(uprightW, uprightH))
+            val metaDegrees = imageProxy.imageInfo.rotationDegrees
+            val raw = imageProxy.toBitmap()
+            val bufW = raw.width
+            val bufH = raw.height
+            val preview = previewView
+            val degrees = LandmarkOrientation.effectiveBitmapRotationDegrees(
+                bufferWidth = bufW,
+                bufferHeight = bufH,
+                rotationDegrees = metaDegrees,
+                previewWidth = preview?.width ?: 0,
+                previewHeight = preview?.height ?: 0,
+            )
+            // Rotate into preview-upright space before inference so landmark (x,y)
+            // match portrait PreviewView (eyes separated on X, not Y).
+            val upright = rotateToUpright(raw, degrees)
+            if (upright !== raw) {
+                raw.recycle()
+            }
+            pendingFrameSize.set(FrameSize(upright.width, upright.height))
 
-            val bitmap = imageProxy.toBitmap()
-            val mpImage = BitmapImageBuilder(bitmap).build()
-            val imageOptions = ImageProcessingOptions.builder()
-                .setRotationDegrees(degrees)
-                .build()
-            landmarker.detectAsync(mpImage, imageOptions, SystemClock.uptimeMillis())
+            val mpImage = BitmapImageBuilder(upright).build()
+            landmarker.detectAsync(mpImage, SystemClock.uptimeMillis())
         } catch (_: Throwable) {
             frameCallback?.invoke(null)
         } finally {
@@ -205,8 +219,11 @@ class MediaPipeFaceTracker(
             frameCallback?.invoke(null)
             return
         }
-        val rawLandmarks = faces[0].map { Vec3(it.x(), it.y(), it.z()) }
-        val smoothed = landmarkSmoother.smooth(rawLandmarks)
+        // Safety net: if canthi are still stacked vertically, rotate landmark space.
+        val oriented = LandmarkOrientation.ensureEyeLineHorizontal(
+            faces[0].map { Vec3(it.x(), it.y(), it.z()) },
+        )
+        val landmarks = landmarkSmoother.smooth(oriented)
 
         val matricesOptional = result.facialTransformationMatrixes()
         val matrix = if (matricesOptional.isPresent) {
@@ -220,18 +237,24 @@ class MediaPipeFaceTracker(
             Mat4.identity()
         }
 
-        val frameSize = pendingFrameSize.get()
         val preview = previewView
+        val viewW = preview?.width ?: 0
+        val viewH = preview?.height ?: 0
+        // Wait until PreviewView has a real size so aspect matches the Filament surface.
+        if (viewW <= 0 || viewH <= 0) {
+            return
+        }
+        val frameSize = pendingFrameSize.get()
         val mapping = FaceCoordMapper.ViewMapping(
-            imageWidth = frameSize?.width ?: 0,
-            imageHeight = frameSize?.height ?: 0,
-            viewWidth = preview?.width ?: 0,
-            viewHeight = preview?.height ?: 0,
+            imageWidth = frameSize?.width ?: viewW,
+            imageHeight = frameSize?.height ?: viewH,
+            viewWidth = viewW,
+            viewHeight = viewH,
             mirrorFrontCamera = true,
         )
 
         val overlayFrame = FaceFrame(
-            landmarks = smoothed,
+            landmarks = landmarks,
             facialTransformationMatrix = matrix,
             faceDetected = true,
         ).toOverlaySpace(mapping)
@@ -252,6 +275,17 @@ class MediaPipeFaceTracker(
         private const val MIN_DETECTION_CONFIDENCE = 0.4f
         private const val MIN_PRESENCE_CONFIDENCE = 0.4f
         private const val MIN_TRACKING_CONFIDENCE = 0.4f
+
+        /**
+         * Rotates a CameraX analysis bitmap so it matches display upright orientation.
+         * [rotationDegrees] is [androidx.camera.core.ImageInfo.getRotationDegrees] (clockwise).
+         */
+        internal fun rotateToUpright(bitmap: Bitmap, rotationDegrees: Int): Bitmap {
+            val degrees = ((rotationDegrees % 360) + 360) % 360
+            if (degrees == 0) return bitmap
+            val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
+            return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        }
     }
 }
 

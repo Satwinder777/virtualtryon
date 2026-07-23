@@ -1,14 +1,20 @@
 package com.shergill.tryon.domain
 
-import kotlin.math.max
-
 /**
- * Maps MediaPipe normalized landmarks (upright analysis image, Y-down)
- * into Filament orthographic world space that matches a [PreviewView]-sized overlay
- * using the same FILL_CENTER crop + front-camera mirror as the live preview.
+ * Maps MediaPipe normalized landmarks (analysis image, Y-down, [0,1]) into Filament
+ * orthographic overlay space that matches the on-screen selfie preview.
  *
- * World space is **pixel-isotropic**: Y ∈ [-1, 1] (full view height), X ∈ [-aspect, aspect]
- * where `aspect = viewWidth / viewHeight`. Matches Filament ORTHO(-aspect..aspect, -1..1).
+ * Mapping is **face-relative / landmark-direct** (not a fixed screen corner):
+ * - MediaPipe (0.5, 0.5) → overlay origin (face/camera center)
+ * - Face moves down in the image → landmark.y ↑ → overlay Y ↓
+ * - Front camera is mirrored on X to match PreviewView
+ *
+ * World space is pixel-isotropic: Y ∈ [-1, 1], X ∈ [-aspect, aspect]
+ * (`aspect = viewWidth / viewHeight`), matching Filament ORTHO(-aspect..aspect, -1..1).
+ *
+ * We intentionally do **not** simulate a secondary FILL_CENTER crop from analysis→view
+ * using mismatched buffer sizes — that drift parked accessories in screen corners
+ * while the face moved.
  */
 object FaceCoordMapper {
 
@@ -20,44 +26,25 @@ object FaceCoordMapper {
         val mirrorFrontCamera: Boolean = true,
     ) {
         val isValid: Boolean
-            get() = imageWidth > 0 && imageHeight > 0 && viewWidth > 0 && viewHeight > 0
+            get() = viewWidth > 0 && viewHeight > 0
 
-        /** Width / height — used so 1 world-unit X equals 1 world-unit Y in pixels. */
+        /** Width / height — 1 world-unit X equals 1 world-unit Y in pixels. */
         val aspect: Float
             get() = if (viewHeight > 0) viewWidth.toFloat() / viewHeight.toFloat() else 1f
     }
 
     /**
      * Converts one landmark into overlay world space (Y-up, pixel-isotropic).
+     * Output (x, y) tracks this landmark every frame — no cache inside the mapper.
      */
     fun toWorld(landmark: Vec3, mapping: ViewMapping): Vec3 {
-        if (!mapping.isValid) {
-            var x = landmark.x * 2f - 1f
-            val y = 1f - landmark.y * 2f
-            if (mapping.mirrorFrontCamera) x = -x
-            return Vec3(x * mapping.aspect, y, -landmark.z * 2f)
-        }
-
-        val scale = max(
-            mapping.viewWidth.toFloat() / mapping.imageWidth.toFloat(),
-            mapping.viewHeight.toFloat() / mapping.imageHeight.toFloat(),
-        )
-        val scaledW = mapping.imageWidth * scale
-        val scaledH = mapping.imageHeight * scale
-        val offsetX = (mapping.viewWidth - scaledW) * 0.5f
-        val offsetY = (mapping.viewHeight - scaledH) * 0.5f
-
-        var viewX = landmark.x * mapping.imageWidth * scale + offsetX
-        val viewY = landmark.y * mapping.imageHeight * scale + offsetY
+        var x = landmark.x
         if (mapping.mirrorFrontCamera) {
-            viewX = mapping.viewWidth - viewX
+            x = 1f - x
         }
-
-        // Normalized device-style coords, then stretch X by aspect for isotropic units.
-        val nx = (viewX / mapping.viewWidth) * 2f - 1f
-        val ny = 1f - (viewY / mapping.viewHeight) * 2f
-        val ndcZ = -landmark.z * 2f
-        return Vec3(nx * mapping.aspect, ny, ndcZ)
+        val nx = x * 2f - 1f
+        val ny = 1f - landmark.y * 2f
+        return Vec3(nx * mapping.aspect, ny, -landmark.z * 2f)
     }
 
     fun toWorldLandmarks(landmarks: List<Vec3>, mapping: ViewMapping): List<Vec3> =

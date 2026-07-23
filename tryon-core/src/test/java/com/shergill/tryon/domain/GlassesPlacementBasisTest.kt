@@ -8,12 +8,18 @@ import kotlin.math.abs
 
 class GlassesPlacementBasisTest {
 
-    private fun faceWithEyes(left: Vec3, right: Vec3, bridge: Vec3? = null): FaceFrame {
-        val list = MutableList(FaceLandmarks.LANDMARK_COUNT) { Vec3.ZERO }
-        list[FaceLandmarks.LEFT_EYE_INNER] = left
-        list[FaceLandmarks.RIGHT_EYE_INNER] = right
-        list[FaceLandmarks.LEFT_EYE_OUTER] = left
-        list[FaceLandmarks.RIGHT_EYE_OUTER] = right
+    private fun faceWithEyeCorners(
+        rightOuter: Vec3, // 33
+        rightInner: Vec3, // 133
+        leftInner: Vec3, // 362
+        leftOuter: Vec3, // 263
+        bridge: Vec3? = null,
+    ): FaceFrame {
+        val list = MutableList(FaceLandmarks.FULL_MESH_WITH_IRIS) { Vec3.ZERO }
+        list[FaceLandmarks.RIGHT_EYE_OUTER] = rightOuter
+        list[FaceLandmarks.RIGHT_EYE_INNER] = rightInner
+        list[FaceLandmarks.LEFT_EYE_INNER] = leftInner
+        list[FaceLandmarks.LEFT_EYE_OUTER] = leftOuter
         list[FaceLandmarks.FOREHEAD_TOP] = Vec3(0f, 0.35f, 0f)
         list[FaceLandmarks.CHIN] = Vec3(0f, -0.25f, 0f)
         if (bridge != null) list[FaceLandmarks.NOSE_BRIDGE] = bridge
@@ -21,54 +27,174 @@ class GlassesPlacementBasisTest {
     }
 
     @Test
-    fun autoFit_scalesFromOuterEyeSpan() {
-        val placement = GlassesPlacementStrategy(baseScaleFactor = 1.08f).computeTransform(
-            faceWithEyes(left = Vec3(-0.2f, 0.1f, 0f), right = Vec3(0.2f, 0.1f, 0f)),
+    fun scale_usesOuterCornerDistance_33_to_263() {
+        val face = faceWithEyeCorners(
+            rightOuter = Vec3(-0.3f, 0.1f, 0f),
+            rightInner = Vec3(-0.1f, 0.1f, 0f),
+            leftInner = Vec3(0.1f, 0.1f, 0f),
+            leftOuter = Vec3(0.3f, 0.1f, 0f),
         )
+        val placement = GlassesPlacementStrategy(
+            glassesReferenceWidth = 1f,
+            framePadding = 1f,
+        ).computeTransform(face)
         assertNotNull(placement)
-        assertEquals(0.4f * 1.08f, placement!!.scaleMultiplier, 1e-4f)
+        assertEquals(0.6f, placement!!.scaleMultiplier, 1e-4f)
     }
 
     @Test
-    fun autoFit_tracksFaceOnX() {
-        val center = GlassesPlacementStrategy().computeTransform(
-            faceWithEyes(left = Vec3(-0.2f, 0.1f, 0f), right = Vec3(0.2f, 0.1f, 0f)),
+    fun anchor_tracksLiveEyeMidpoint_notScreenCorner() {
+        val high = GlassesPlacementStrategy(noseBridgeBlendY = 0f).computeTransform(
+            faceWithEyeCorners(
+                rightOuter = Vec3(-0.2f, 0.4f, 0f),
+                rightInner = Vec3(-0.1f, 0.4f, 0f),
+                leftInner = Vec3(0.1f, 0.4f, 0f),
+                leftOuter = Vec3(0.2f, 0.4f, 0f),
+            ),
         )!!
-        val right = GlassesPlacementStrategy().computeTransform(
-            faceWithEyes(left = Vec3(0.1f, 0.1f, 0f), right = Vec3(0.5f, 0.1f, 0f)),
+        val low = GlassesPlacementStrategy(noseBridgeBlendY = 0f).computeTransform(
+            faceWithEyeCorners(
+                rightOuter = Vec3(-0.2f, -0.3f, 0f),
+                rightInner = Vec3(-0.1f, -0.3f, 0f),
+                leftInner = Vec3(0.1f, -0.3f, 0f),
+                leftOuter = Vec3(0.2f, -0.3f, 0f),
+            ),
         )!!
-        assertTrue(right.position.x - center.position.x > 0.25f)
+        assertEquals(0.4f, high.position.y, 1e-3f)
+        assertEquals(-0.3f, low.position.y, 1e-3f)
+        assertTrue(high.position.y - low.position.y > 0.6f)
     }
 
     @Test
-    fun autoFit_tracksFaceOnY() {
-        val high = GlassesPlacementStrategy().computeTransform(
-            faceWithEyes(left = Vec3(-0.2f, 0.3f, 0f), right = Vec3(0.2f, 0.3f, 0f)),
+    fun anchor_tracksLiveEyeMidpoint_onX() {
+        val left = GlassesPlacementStrategy(noseBridgeBlendY = 0f).computeTransform(
+            faceWithEyeCorners(
+                rightOuter = Vec3(-0.5f, 0.1f, 0f),
+                rightInner = Vec3(-0.4f, 0.1f, 0f),
+                leftInner = Vec3(-0.2f, 0.1f, 0f),
+                leftOuter = Vec3(-0.1f, 0.1f, 0f),
+            ),
         )!!
-        val low = GlassesPlacementStrategy().computeTransform(
-            faceWithEyes(left = Vec3(-0.2f, -0.2f, 0f), right = Vec3(0.2f, -0.2f, 0f)),
+        val right = GlassesPlacementStrategy(noseBridgeBlendY = 0f).computeTransform(
+            faceWithEyeCorners(
+                rightOuter = Vec3(0.1f, 0.1f, 0f),
+                rightInner = Vec3(0.2f, 0.1f, 0f),
+                leftInner = Vec3(0.4f, 0.1f, 0f),
+                leftOuter = Vec3(0.5f, 0.1f, 0f),
+            ),
         )!!
-        assertTrue(high.position.y - low.position.y > 0.35f)
+        assertTrue(right.position.x - left.position.x > 0.5f)
     }
 
     @Test
-    fun placementSmoother_blendsTowardNext() {
-        val smoother = PlacementSmoother(posAlpha = 0.5f, scaleAlpha = 0.5f, rotAlpha = 0.5f)
-        val a = Placement(Vec3(0f, 0f, 0f), Quaternion.IDENTITY, 1f)
-        val b = Placement(Vec3(2f, 0f, 0f), Quaternion.IDENTITY, 1f)
-        assertEquals(0f, smoother.smooth(a)!!.position.x, 1e-4f)
-        val mid = smoother.smooth(b)!!
-        assertEquals(1f, mid.position.x, 1e-3f)
-    }
-
-    @Test
-    fun noisyEyeDepth_doesNotTipFramesVertical() {
+    fun rotation_followsEyeLineTilt() {
         val q = GlassesPlacementStrategy().computeTransform(
-            faceWithEyes(left = Vec3(-0.2f, 0.1f, 0.8f), right = Vec3(0.2f, 0.1f, -0.8f)),
+            faceWithEyeCorners(
+                rightOuter = Vec3(-0.25f, 0.20f, 0f),
+                rightInner = Vec3(-0.15f, 0.20f, 0f),
+                leftInner = Vec3(0.15f, 0.0f, 0f),
+                leftOuter = Vec3(0.25f, 0.0f, 0f),
+            ),
         )!!.rotation
-        // Local +X (temple axis) must stay roughly screen-horizontal.
-        val alongFrame = q.rotate(Vec3(1f, 0f, 0f))
-        assertTrue(abs(alongFrame.y) < 0.35f)
-        assertTrue(abs(alongFrame.x) > 0.7f)
+        // Flat Z → yaw≈0; roll from tilted eye line dominates.
+        assertTrue(abs(q.z) > 0.1f)
+    }
+
+    @Test
+    fun rotation_yawsWhenNoseTipOffsetsFromEyeMid() {
+        var captured = GlassesPlacementDebug(
+            landmark33 = Vec3.ZERO,
+            landmark133 = Vec3.ZERO,
+            landmark362 = Vec3.ZERO,
+            landmark263 = Vec3.ZERO,
+            landmark168 = null,
+            anchor = Vec3.ZERO,
+            scale = 0f,
+            rollDeg = 0f,
+        )
+        val list = MutableList(FaceLandmarks.FULL_MESH_WITH_IRIS) { Vec3.ZERO }
+        list[FaceLandmarks.RIGHT_EYE_OUTER] = Vec3(-0.3f, 0.1f, 0f)
+        list[FaceLandmarks.RIGHT_EYE_INNER] = Vec3(-0.1f, 0.1f, 0f)
+        list[FaceLandmarks.LEFT_EYE_INNER] = Vec3(0.1f, 0.1f, 0f)
+        list[FaceLandmarks.LEFT_EYE_OUTER] = Vec3(0.3f, 0.1f, 0f)
+        list[FaceLandmarks.FOREHEAD_TOP] = Vec3(0f, 0.35f, 0f)
+        list[FaceLandmarks.CHIN] = Vec3(0f, -0.25f, 0f)
+        // Nose tip shifted toward +X → positive yaw.
+        list[FaceLandmarks.NOSE_TIP] = Vec3(0.18f, 0.0f, 0f)
+        GlassesPlacementStrategy(onDebug = { captured = it })
+            .computeTransform(FaceFrame(list, Mat4.identity(), faceDetected = true))
+        assertTrue(
+            "Expected yaw from nose tip offset, got ${captured.yawDeg}",
+            captured.yawDeg > 5f,
+        )
+        assertTrue(abs(captured.yawDeg) <= 32f + 1e-3f)
+    }
+
+    @Test
+    fun rotation_ignoresBiasedEyeDepthForYaw() {
+        var capturedYaw = 0f
+        // Large opposite Z on eyes (the bug that pinned yaw≈−34°) — must NOT drive yaw.
+        val face = faceWithEyeCorners(
+            rightOuter = Vec3(-0.3f, 0.1f, 0.25f),
+            rightInner = Vec3(-0.1f, 0.1f, 0.25f),
+            leftInner = Vec3(0.1f, 0.1f, -0.25f),
+            leftOuter = Vec3(0.3f, 0.1f, -0.25f),
+            bridge = Vec3(0f, 0.08f, 0f),
+        )
+        GlassesPlacementStrategy(onDebug = { capturedYaw = it.yawDeg }).computeTransform(face)
+        assertTrue(
+            "Yaw must not follow MediaPipe eye-Z bias, got $capturedYaw",
+            abs(capturedYaw) < 3f,
+        )
+    }
+
+    @Test
+    fun rotation_pitchesWhenForeheadChinDepthDiffers() {
+        // Default pitchGain is 0 (temple stability); opt-in for this cue.
+        var capturedPitch = 0f
+        val list = MutableList(FaceLandmarks.FULL_MESH_WITH_IRIS) { Vec3.ZERO }
+        list[FaceLandmarks.RIGHT_EYE_OUTER] = Vec3(-0.3f, 0.1f, 0f)
+        list[FaceLandmarks.RIGHT_EYE_INNER] = Vec3(-0.1f, 0.1f, 0f)
+        list[FaceLandmarks.LEFT_EYE_INNER] = Vec3(0.1f, 0.1f, 0f)
+        list[FaceLandmarks.LEFT_EYE_OUTER] = Vec3(0.3f, 0.1f, 0f)
+        list[FaceLandmarks.FOREHEAD_TOP] = Vec3(0f, 0.35f, 0.20f)
+        list[FaceLandmarks.CHIN] = Vec3(0f, -0.25f, -0.10f)
+        val face = FaceFrame(list, Mat4.identity(), faceDetected = true)
+        GlassesPlacementStrategy(
+            pitchGain = 0.35f,
+            onDebug = { capturedPitch = it.pitchDeg },
+        ).computeTransform(face)
+        assertTrue(
+            "Expected some pitch from forehead/chin depth, got $capturedPitch",
+            abs(capturedPitch) > 1f,
+        )
+        assertTrue(abs(capturedPitch) <= 18f + 1e-3f)
+    }
+
+    @Test
+    fun defaultScale_isLargerThanRawEyeSpan() {
+        val face = faceWithEyeCorners(
+            rightOuter = Vec3(-0.3f, 0.1f, 0f),
+            rightInner = Vec3(-0.1f, 0.1f, 0f),
+            leftInner = Vec3(0.1f, 0.1f, 0f),
+            leftOuter = Vec3(0.3f, 0.1f, 0f),
+        )
+        val placement = GlassesPlacementStrategy().computeTransform(face)!!
+        // eye span = 0.6; default padding 2.2 → scale 1.32
+        assertEquals(0.6f * 2.2f, placement.scaleMultiplier, 1e-3f)
+    }
+
+    @Test
+    fun faceCoordMapper_faceDown_movesOverlayYDown() {
+        val mapping = FaceCoordMapper.ViewMapping(
+            imageWidth = 720,
+            imageHeight = 1280,
+            viewWidth = 1080,
+            viewHeight = 1920,
+            mirrorFrontCamera = true,
+        )
+        val high = FaceCoordMapper.toWorld(Vec3(0.5f, 0.3f, 0f), mapping)
+        val low = FaceCoordMapper.toWorld(Vec3(0.5f, 0.7f, 0f), mapping)
+        assertTrue(high.y > low.y)
     }
 }

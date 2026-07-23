@@ -61,8 +61,13 @@ class FilamentAccessoryRenderer(
     private var materialProvider: UbershaderProvider? = null
 
     private var asset: FilamentAsset? = null
-    /** Pivot that parents every glTF scene root (critical for multi-root assets like Khronos). */
+    /**
+     * Empty identity pivot we create in [ModelBoundsNormalizer.bindUnifiedRoot].
+     * Placement is applied here — never on glTF nodes (they keep baked RX matrices).
+     */
     private var rootEntity: Int = 0
+    /** True when [rootEntity] is our invent pivot (not owned by the FilamentAsset). */
+    private var ownsPlacementPivot: Boolean = false
     private var normalizeTransform: FloatArray = ModelBoundsNormalizer.compute(
         AxisAlignedBounds(-0.5f, -0.5f, -0.5f, 0.5f, 0.5f, 0.5f),
     ).transform
@@ -211,12 +216,27 @@ class FilamentAccessoryRenderer(
             val normalize = ModelBoundsNormalizer.computeFromAsset(loaded, accessoryType = accessoryType)
             normalizeTransform = normalize.transform
             // Bind BEFORE releaseSourceData so instance hierarchy is intact.
-            rootEntity = ModelBoundsNormalizer.bindUnifiedRoot(eng.transformManager, loaded)
+            ownsPlacementPivot = false
+            rootEntity = try {
+                ModelBoundsNormalizer.bindUnifiedRoot(eng.transformManager, loaded)
+            } catch (t: Throwable) {
+                0
+            }
+            if (rootEntity != 0) {
+                ownsPlacementPivot = true
+            } else {
+                // Last resort — may wipe baked node matrices on some GLBs.
+                rootEntity = loaded.root
+                ownsPlacementPivot = false
+            }
             loaded.releaseSourceData()
 
             // Prefer instance entities (all mesh nodes under the primary instance).
             val entities = loaded.instance?.entities ?: loaded.entities
             scene?.addEntities(entities)
+            if (ownsPlacementPivot && rootEntity != 0) {
+                scene?.addEntity(rootEntity)
+            }
             modelVisible = true
         }
     }
@@ -241,7 +261,9 @@ class FilamentAccessoryRenderer(
 
             val eng = engine ?: return@runOnMain
             uiHelper?.detach()
+            // Detach before destroying renderer — DisplayHelper callbacks NPE if renderer is null.
             displayHelper?.detach()
+            displayHelper = null
             swapChain?.let {
                 eng.destroySwapChain(it)
                 eng.flushAndWait()
@@ -280,7 +302,6 @@ class FilamentAccessoryRenderer(
             camera = null
             swapChain = null
             uiHelper = null
-            displayHelper = null
             assetLoader = null
             resourceLoader = null
             materialProvider = null
@@ -318,6 +339,9 @@ class FilamentAccessoryRenderer(
         if (placement == null) {
             if (modelVisible) {
                 scene?.removeEntities(entities)
+                if (ownsPlacementPivot && rootEntity != 0) {
+                    scene?.removeEntity(rootEntity)
+                }
                 modelVisible = false
             }
             return
@@ -325,9 +349,12 @@ class FilamentAccessoryRenderer(
 
         if (!modelVisible) {
             scene?.addEntities(entities)
+            if (ownsPlacementPivot && rootEntity != 0) {
+                scene?.addEntity(rootEntity)
+            }
             modelVisible = true
         }
-        // Column-major world matrix: T * R * (s * Normalize).
+        // Column-major world matrix: T * R * (s * Normalize) on the empty pivot only.
         tm.setTransform(instance, composeTransform(normalizeTransform, placement, frame.calibration))
     }
 
@@ -336,9 +363,20 @@ class FilamentAccessoryRenderer(
         val loaded = asset ?: return
         val entities = loaded.instance?.entities ?: loaded.entities
         scene?.removeEntities(entities)
+        if (ownsPlacementPivot && rootEntity != 0) {
+            scene?.removeEntity(rootEntity)
+            val tm = eng.transformManager
+            val ti = tm.getInstance(rootEntity)
+            if (ti != 0) {
+                tm.destroy(ti)
+            }
+            eng.destroyEntity(rootEntity)
+            EntityManager.get().destroy(rootEntity)
+        }
         assetLoader?.destroyAsset(loaded)
         asset = null
         rootEntity = 0
+        ownsPlacementPivot = false
         modelVisible = false
     }
 

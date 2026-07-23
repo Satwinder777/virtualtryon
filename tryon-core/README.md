@@ -55,6 +55,29 @@ Embed `TryOnScreen` (or a non-Compose SurfaceView host) inside a Flutter `Platfo
 - Requires a front-facing camera (`android.hardware.camera.any`); devices without one show an
   unsupported-device message.
 
+## Known pitfalls (glasses / Filament)
+
+- **Analysis landmarks must be preview-upright.** Rotating only via MediaPipe
+  `ImageProcessingOptions` (without rotating the CameraX bitmap) left landmarks in sideways
+  buffer space: eye corners shared X and spanned Y → `rollDeg≈90°` and glasses drawn vertical
+  on a frontal face. Rotate the analysis bitmap to upright before `detectAsync` (official sample).
+  Also apply [LandmarkOrientation.ensureEyeLineHorizontal] as a safety net, and
+  [LandmarkOrientation.effectiveBitmapRotationDegrees] to avoid missed/double buffer rotates.
+- **Never `setTransform` on a glTF node for Khronos Sunglasses.** Those roots bake ≈RX(90°) in
+  their local matrices. Overwriting them → vertical temples, overscale, frames near the chin.
+  Always invent an empty identity pivot in `bindUnifiedRoot` and apply placement only there.
+- **Multi-root GLB:** Prefer parenting the whole asset hierarchy under that empty pivot. Do not
+  pick `instance.root` / a temple mesh as the transform target.
+- **Parent cycles** in `bindUnifiedRoot` → Filament SIGSEGV / stack overflow on Submit.
+- **No RX(−90°) when AABB is already deep (sizeZ > sizeY).** That tipped correct −Z temples
+  into the face plane / above the head. Only bake RX(−90°) when `sizeY > sizeZ` (local +Y
+  temples / hanging arms on the selfie).
+- **Glasses orientation:** full eye-line **roll** + **2D nose-tip yaw**; pitch default off
+  (Z-pitch swung temples into the face plane).
+- **No FILL_CENTER analysis→view crop** with mismatched buffers in `FaceCoordMapper` (corner drift).
+- **No double EMA** (landmark + placement) for glasses — keep passthrough while face is detected.
+- `mesh=478/478` is the full iris mesh, not a partial-tracking bug.
+
 ## Assets
 
 Place MediaPipe’s Face Landmarker model at:
