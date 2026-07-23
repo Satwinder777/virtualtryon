@@ -10,12 +10,14 @@ import kotlin.math.sqrt
  * - Left eye center = midpoint(33, 133)
  * - Right eye center = midpoint(362, 263)
  * - Anchor = midpoint(left, right), Y blended with nose bridge 168
- * - Scale = distance(33, 263) / glassesReferenceWidth × [framePadding]
- *   Default padding ≈2.2 so frames span the face like real sunglasses (1.05–1.42 looked tiny).
+ * - Scale = distance(33, 263) / glassesReferenceWidth × [framePadding],
+ *   divided by |cos(yaw)| so frames do not shrink when the head turns (XY foreshortening).
+ *   Default padding ≈1.7 (face-fitting; 2.2 was oversized).
  * - Rotation:
- *   - **Roll** = eye-line atan2 (full)
- *   - **Yaw** = nose-tip X vs mid-eyes (2D) — NOT raw MediaPipe Z (Z bias pinned yaw≈−34°/clamp)
- *   - **Pitch** = light forehead↔chin depth, heavily damped
+ *   - **Yaw** = nose-tip X vs mid-eyes (2D) — NOT raw MediaPipe Z (Z bias pinned yaw≈−34°)
+ *   - **Roll** = eye-line atan2, **damped when |yaw| is large** — profile foreshortening
+ *     makes dy/dx explode (~50° false roll) and tips temples onto the face
+ *   - **Pitch** = light forehead↔chin depth, heavily damped (default off)
  *
  * No iris, no previous-frame pose, no screen-corner defaults inside this strategy.
  * Renderer apply order: `T * R * (s * Normalize)`.
@@ -25,16 +27,22 @@ import kotlin.math.sqrt
  */
 class GlassesPlacementStrategy(
     private val glassesReferenceWidth: Float = 1f,
-    /** Multiplier on outer-eye span → on-face frame width. */
-    private val framePadding: Float = 2.2f,
+    /** Multiplier on outer-eye span → on-face frame width (2.2 looked oversized). */
+    private val framePadding: Float = 1.7f,
     private val noseBridgeBlendY: Float = 0.35f,
     /** Degrees of yaw when nose tip sits one full eye-span off the eye midpoint. */
-    private val yawScaleDeg: Float = 38f,
+    private val yawScaleDeg: Float = 42f,
     private val yawGain: Float = 1f,
     /** Keep pitch near 0 — landmark-Z pitch tipped temples into the face plane. */
     private val pitchGain: Float = 0f,
-    private val maxYawDeg: Float = 32f,
+    /** Allow near-profile turns; old 32° clamp left temples drawn across the cheek. */
+    private val maxYawDeg: Float = 58f,
     private val maxPitchDeg: Float = 18f,
+    /**
+     * |yaw| at which eye-line roll is fully suppressed. Below this, roll fades with
+     * `(1 - |yaw|/rollYawFadeDeg)²`.
+     */
+    private val rollYawFadeDeg: Float = 48f,
     private val onDebug: ((GlassesPlacementDebug) -> Unit)? = null,
 ) : PlacementStrategy {
 
@@ -70,7 +78,7 @@ class GlassesPlacementStrategy(
 
         val dx = screenRight.x - screenLeft.x
         val dy = screenRight.y - screenLeft.y
-        val rollDeg = Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())).toFloat()
+        val rawRollDeg = Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())).toFloat()
 
         val eyeSpanXy = sqrt(dx * dx + dy * dy).coerceAtLeast(1e-4f)
 
@@ -81,6 +89,13 @@ class GlassesPlacementStrategy(
             yawDeg = ((yawLandmark.x - midX) / eyeSpanXy) * yawScaleDeg * yawGain
             yawDeg = yawDeg.coerceIn(-maxYawDeg, maxYawDeg)
         }
+
+        // Side face: foreshortened eyes make atan2(dy,dx) huge → temples tip onto the face.
+        // Keep full roll when frontal; fade it out as |yaw| grows.
+        val yawAbs = kotlin.math.abs(yawDeg)
+        val fade = rollYawFadeDeg.coerceAtLeast(1f)
+        val rollWeight = (1f - (yawAbs / fade).coerceIn(0f, 1f)).let { w -> w * w }
+        val rollDeg = rawRollDeg * rollWeight
 
         // Pitch: small depth cue only (heavily damped — Z scale ≠ XY).
         val forehead = face.landmarkOrNull(FaceLandmarks.FOREHEAD_TOP)
@@ -103,7 +118,9 @@ class GlassesPlacementStrategy(
         val spanDx = rightOuter.x - leftOuter.x
         val spanDy = rightOuter.y - leftOuter.y
         val eyeSpan = sqrt(spanDx * spanDx + spanDy * spanDy).coerceAtLeast(1e-4f)
-        val scale = (eyeSpan / glassesReferenceWidth.coerceAtLeast(1e-4f)) * framePadding
+        // Undo XY foreshortening so frames stay face-width when the head turns.
+        val yawCos = kotlin.math.cos(Math.toRadians(yawDeg.toDouble())).toFloat().coerceAtLeast(0.45f)
+        val scale = (eyeSpan / glassesReferenceWidth.coerceAtLeast(1e-4f)) * framePadding / yawCos
 
         onDebug?.invoke(
             GlassesPlacementDebug(

@@ -14,11 +14,11 @@ import kotlin.math.max
  * rotation swings the frame off the face. Scale by frame **width (X)** so eye-span
  * maps 1:1.
  *
- * Temple orientation: after glTF node transforms, temples should lie along **−Z** (toward
- * the ears). If the bind-pose AABB is taller than it is deep (`sizeY > sizeZ`), node
- * matrices were effectively skipped / local meshes still point along **+Y**. Bake
- * **RX(−90°)** so +Y → −Z. Never bake when `sizeZ > sizeY` (already correct) — that was
- * the old “temples above head / vertical sticks” regression.
+ * Temple orientation: do **not** bake RX(±90°) here. Khronos Sunglasses (and similar)
+ * already bake ≈RX(90°) on glTF nodes; [bindUnifiedRoot] preserves those matrices.
+ * An extra RX(−90°) based on a tall local AABB cancels the node RX → temples hang
+ * down the cheeks (the screenshot “dandian neeche” bug). Placement stays on the empty
+ * pivot only.
  */
 object ModelBoundsNormalizer {
 
@@ -37,72 +37,23 @@ object ModelBoundsNormalizer {
 
     const val TARGET_UNIT_SIZE: Float = 1f
 
-    /** Column-major RX(−90°): (x,y,z) → (x, z, −y). Maps local +Y temples to −Z. */
-    private val RX_MINUS_90 = floatArrayOf(
-        1f, 0f, 0f, 0f,
-        0f, 0f, -1f, 0f,
-        0f, 1f, 0f, 0f,
-        0f, 0f, 0f, 1f,
-    )
-
     fun compute(
         boundingBox: AxisAlignedBounds,
         targetSize: Float = TARGET_UNIT_SIZE,
         accessoryType: AccessoryType? = null,
     ): NormalizeResult {
-        var minX = boundingBox.minX
-        var minY = boundingBox.minY
-        var minZ = boundingBox.minZ
-        var maxX = boundingBox.maxX
-        var maxY = boundingBox.maxY
-        var maxZ = boundingBox.maxZ
+        val minX = boundingBox.minX
+        val minY = boundingBox.minY
+        val minZ = boundingBox.minZ
+        val maxX = boundingBox.maxX
+        val maxY = boundingBox.maxY
+        val maxZ = boundingBox.maxZ
 
-        var sizeX = (maxX - minX).coerceAtLeast(1e-6f)
-        var sizeY = (maxY - minY).coerceAtLeast(1e-6f)
-        var sizeZ = (maxZ - minZ).coerceAtLeast(1e-6f)
+        val sizeX = (maxX - minX).coerceAtLeast(1e-6f)
+        val sizeY = (maxY - minY).coerceAtLeast(1e-6f)
+        val sizeZ = (maxZ - minZ).coerceAtLeast(1e-6f)
 
         val isGlasses = accessoryType == AccessoryType.GLASSES
-        // Local / face-plane temples (tall AABB) → fold back to −Z.
-        val applyTempleRx = isGlasses && sizeY > sizeZ * 1.05f
-        if (applyTempleRx) {
-            val corners = listOf(
-                floatArrayOf(minX, minY, minZ),
-                floatArrayOf(minX, minY, maxZ),
-                floatArrayOf(minX, maxY, minZ),
-                floatArrayOf(minX, maxY, maxZ),
-                floatArrayOf(maxX, minY, minZ),
-                floatArrayOf(maxX, minY, maxZ),
-                floatArrayOf(maxX, maxY, minZ),
-                floatArrayOf(maxX, maxY, maxZ),
-            )
-            var nMinX = Float.POSITIVE_INFINITY
-            var nMinY = Float.POSITIVE_INFINITY
-            var nMinZ = Float.POSITIVE_INFINITY
-            var nMaxX = Float.NEGATIVE_INFINITY
-            var nMaxY = Float.NEGATIVE_INFINITY
-            var nMaxZ = Float.NEGATIVE_INFINITY
-            for (c in corners) {
-                // (x,y,z) → (x, z, -y)
-                val x = c[0]
-                val y = c[2]
-                val z = -c[1]
-                nMinX = minOf(nMinX, x)
-                nMinY = minOf(nMinY, y)
-                nMinZ = minOf(nMinZ, z)
-                nMaxX = maxOf(nMaxX, x)
-                nMaxY = maxOf(nMaxY, y)
-                nMaxZ = maxOf(nMaxZ, z)
-            }
-            minX = nMinX
-            minY = nMinY
-            minZ = nMinZ
-            maxX = nMaxX
-            maxY = nMaxY
-            maxZ = nMaxZ
-            sizeX = (maxX - minX).coerceAtLeast(1e-6f)
-            sizeY = (maxY - minY).coerceAtLeast(1e-6f)
-            sizeZ = (maxZ - minZ).coerceAtLeast(1e-6f)
-        }
 
         // Glasses: unit = width. Others: unit = max extent.
         val scale = if (isGlasses) {
@@ -113,24 +64,19 @@ object ModelBoundsNormalizer {
 
         val centerX = (minX + maxX) * 0.5f
         val centerY = (minY + maxY) * 0.5f
+        // Prefer the lens/front of the AABB (maxZ toward camera) as the placement pivot.
         val centerZ = if (isGlasses) {
             minZ * 0.15f + maxZ * 0.85f
         } else {
             (minZ + maxZ) * 0.5f
         }
 
-        // Column-major: S * T(-center) * [R] — R first when folding temples.
-        val translateScale = floatArrayOf(
+        val transform = floatArrayOf(
             scale, 0f, 0f, 0f,
             0f, scale, 0f, 0f,
             0f, 0f, scale, 0f,
             -centerX * scale, -centerY * scale, -centerZ * scale, 1f,
         )
-        val transform = if (applyTempleRx) {
-            multiplyMat4(translateScale, RX_MINUS_90)
-        } else {
-            translateScale
-        }
 
         return NormalizeResult(
             scale = scale,
@@ -138,26 +84,12 @@ object ModelBoundsNormalizer {
             centerY = centerY,
             centerZ = centerZ,
             transform = transform,
-            appliedFaceCameraRx = applyTempleRx,
+            appliedFaceCameraRx = false,
             mirroredX = false,
             sizeX = sizeX,
             sizeY = sizeY,
             sizeZ = sizeZ,
         )
-    }
-
-    private fun multiplyMat4(a: FloatArray, b: FloatArray): FloatArray {
-        val out = FloatArray(16)
-        for (col in 0 until 4) {
-            for (row in 0 until 4) {
-                out[col * 4 + row] =
-                    a[0 * 4 + row] * b[col * 4 + 0] +
-                        a[1 * 4 + row] * b[col * 4 + 1] +
-                        a[2 * 4 + row] * b[col * 4 + 2] +
-                        a[3 * 4 + row] * b[col * 4 + 3]
-            }
-        }
-        return out
     }
 
     fun computeFromAsset(

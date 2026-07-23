@@ -9,15 +9,15 @@ import org.junit.Test
 class ModelBoundsNormalizerGlassesTest {
 
     @Test
-    fun glasses_scalesByWidth_andPivotsNearFront_whenAlreadyDeep() {
-        // Khronos-like after node RX: wide X, short Y, deep Z from earhooks.
+    fun glasses_scalesByWidth_andPivotsNearFront() {
+        // Khronos-like: wide X, short Y, deep Z from earhooks (node RX already applied).
         val bounds = AxisAlignedBounds(-0.075f, 0.0f, -0.16f, 0.075f, 0.058f, 0.005f)
         val glasses = ModelBoundsNormalizer.compute(bounds, accessoryType = AccessoryType.GLASSES)
         val plain = ModelBoundsNormalizer.compute(bounds, accessoryType = null)
 
         assertFalse(glasses.mirroredX)
         assertFalse(
-            "Must not bake RX when temples already along Z (sizeZ > sizeY)",
+            "Must never bake RX — glTF node matrices already orient temples",
             glasses.appliedFaceCameraRx,
         )
         assertEquals(1f / 0.15f, glasses.scale, 1e-4f)
@@ -30,16 +30,13 @@ class ModelBoundsNormalizerGlassesTest {
     }
 
     @Test
-    fun glasses_bakesRxMinus90_whenAabbTallerThanDeep() {
-        // Local / face-plane temples (earhooks along +Y) — needs fold to −Z.
+    fun glasses_doesNotBakeRx_evenWhenAabbLooksTall() {
+        // Local mesh AABB can look tall (temples along +Y) while node RX already folds
+        // them to −Z. Baking another RX(−90°) cancels nodes → temples hang down cheeks.
         val bounds = AxisAlignedBounds(-0.075f, 0.0f, -0.02f, 0.075f, 0.16f, 0.04f)
         val glasses = ModelBoundsNormalizer.compute(bounds, accessoryType = AccessoryType.GLASSES)
 
-        assertTrue(glasses.appliedFaceCameraRx)
-        // After RX(−90°), depth should dominate height.
-        assertTrue(
-            "Expected sizeZ > sizeY after temple fold, got Y=${glasses.sizeY} Z=${glasses.sizeZ}",
-            glasses.sizeZ > glasses.sizeY,
-        )
+        assertFalse(glasses.appliedFaceCameraRx)
+        assertEquals(bounds.minY, glasses.centerY - glasses.sizeY * 0.5f, 1e-4f)
     }
 }

@@ -127,7 +127,38 @@ class GlassesPlacementBasisTest {
             "Expected yaw from nose tip offset, got ${captured.yawDeg}",
             captured.yawDeg > 5f,
         )
-        assertTrue(abs(captured.yawDeg) <= 32f + 1e-3f)
+        assertTrue(abs(captured.yawDeg) <= 58f + 1e-3f)
+    }
+
+    @Test
+    fun rotation_dampsEyeLineRollWhenYawedSideways() {
+        // Profile-like: large nose offset (yaw) + tilted eye line that would otherwise
+        // produce ~45° false roll and tip temples onto the face.
+        var captured = GlassesPlacementDebug(
+            landmark33 = Vec3.ZERO,
+            landmark133 = Vec3.ZERO,
+            landmark362 = Vec3.ZERO,
+            landmark263 = Vec3.ZERO,
+            landmark168 = null,
+            anchor = Vec3.ZERO,
+            scale = 0f,
+            rollDeg = 0f,
+        )
+        val list = MutableList(FaceLandmarks.FULL_MESH_WITH_IRIS) { Vec3.ZERO }
+        list[FaceLandmarks.RIGHT_EYE_OUTER] = Vec3(-0.25f, 0.20f, 0f)
+        list[FaceLandmarks.RIGHT_EYE_INNER] = Vec3(-0.15f, 0.20f, 0f)
+        list[FaceLandmarks.LEFT_EYE_INNER] = Vec3(0.15f, 0.0f, 0f)
+        list[FaceLandmarks.LEFT_EYE_OUTER] = Vec3(0.25f, 0.0f, 0f)
+        list[FaceLandmarks.FOREHEAD_TOP] = Vec3(0f, 0.35f, 0f)
+        list[FaceLandmarks.CHIN] = Vec3(0f, -0.25f, 0f)
+        list[FaceLandmarks.NOSE_TIP] = Vec3(0.35f, 0.05f, 0f)
+        GlassesPlacementStrategy(onDebug = { captured = it })
+            .computeTransform(FaceFrame(list, Mat4.identity(), faceDetected = true))
+        assertTrue("Expected substantial yaw, got ${captured.yawDeg}", abs(captured.yawDeg) > 20f)
+        assertTrue(
+            "Side-face roll must be damped (was tipping temples onto face), got ${captured.rollDeg}",
+            abs(captured.rollDeg) < 15f,
+        )
     }
 
     @Test
@@ -180,8 +211,8 @@ class GlassesPlacementBasisTest {
             leftOuter = Vec3(0.3f, 0.1f, 0f),
         )
         val placement = GlassesPlacementStrategy().computeTransform(face)!!
-        // eye span = 0.6; default padding 2.2 → scale 1.32
-        assertEquals(0.6f * 2.2f, placement.scaleMultiplier, 1e-3f)
+        // eye span = 0.6; default padding 1.7 → scale 1.02
+        assertEquals(0.6f * 1.7f, placement.scaleMultiplier, 1e-3f)
     }
 
     @Test

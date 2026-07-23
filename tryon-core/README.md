@@ -69,11 +69,14 @@ Embed `TryOnScreen` (or a non-Compose SurfaceView host) inside a Flutter `Platfo
 - **Multi-root GLB:** Prefer parenting the whole asset hierarchy under that empty pivot. Do not
   pick `instance.root` / a temple mesh as the transform target.
 - **Parent cycles** in `bindUnifiedRoot` → Filament SIGSEGV / stack overflow on Submit.
-- **No RX(−90°) when AABB is already deep (sizeZ > sizeY).** That tipped correct −Z temples
-  into the face plane / above the head. Only bake RX(−90°) when `sizeY > sizeZ` (local +Y
-  temples / hanging arms on the selfie).
-- **Glasses orientation:** full eye-line **roll** + **2D nose-tip yaw**; pitch default off
-  (Z-pitch swung temples into the face plane).
+- **Never bake RX(±90°) in [ModelBoundsNormalizer] for glasses.** Khronos node matrices
+  already fold temples to −Z. An extra RX based on a tall local AABB cancels that → temples
+  hang down the cheeks. Keep placement on the empty pivot only.
+- **Glasses orientation:** **2D nose-tip yaw** (up to ~58°) + eye-line **roll damped when
+  |yaw| is large**. Profile foreshortening otherwise makes `atan2(dy,dx)` explode (~50°) and
+  tips temples onto the face. Pitch default off (Z-pitch swung temples into the face plane).
+  Scale divides by `|cos(yaw)|` so frames do not shrink on side turns. Default
+  `framePadding` ≈1.7 (2.2 was oversized).
 - **No FILL_CENTER analysis→view crop** with mismatched buffers in `FaceCoordMapper` (corner drift).
 - **No double EMA** (landmark + placement) for glasses — keep passthrough while face is detected.
 - `mesh=478/478` is the full iris mesh, not a partial-tracking bug.
